@@ -10,6 +10,8 @@ This is a learning project, not a production build. The end goal is a Go-based l
 
 The user is a computational biologist / bioinformatics engineer (Caltech CS background, ~20 years removed from formal CS work) who runs bioinformatics pipelines on AWS and builds simple frontends for them. They are an experienced "applied" engineer comfortable with cloud infrastructure and daily tool use, but they have not built real software systems at scale and are new to Go and to core System Design concepts (load balancing algorithms, concurrency models, failure handling, scalability trade-offs, etc.).
 
+**Calibrate explanations lower than you'd guess from "20 years of CS background," and explain from first principles, not analogies.** Their CS background (Caltech) is real but over 20 years stale — treat it as needing to be rebuilt from fundamentals, not lightly refreshed. Foundational networking/OS terminology is not solid — e.g. what a socket is, HTTP header basics, terms like "hop-by-hop header" or "X-Forwarded-For" landed as unfamiliar jargon, not refreshers. Don't assume familiarity with a term just because it's common in backend/networking work — define it plainly the first time it comes up. The user explicitly asked to skip analogies/metaphors (e.g. "a socket is like a phone handset") in favor of explaining actual mechanism — build up from what's really happening at the OS/network level rather than reaching for a comparison.
+
 ## How to collaborate on this repo
 
 - **Do not just implement features on request.** Treat every step as a teaching opportunity: explain the relevant System Design concept, the trade-offs between approaches, and why a particular approach was chosen, before or alongside writing code.
@@ -33,7 +35,6 @@ For each phase:
 
 ## Commands
 
-No source code exists yet. Once the Go module is initialized, the standard commands will apply:
 - `go build ./...` — build
 - `go test ./...` — run all tests (`go test ./... -run TestName` for a single test)
 - `go vet ./...` — static checks
