@@ -8,6 +8,12 @@ func TestParseBackendURL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parseBackendURL returned unexpected error: %v", err)
 	}
+	if target.Scheme != "http" {
+		t.Fatalf("got scheme %q, want %q", target.Scheme, "http")
+	}
+	if target.Host != "localhost:9000" {
+		t.Fatalf("got host %q, want %q", target.Host, "localhost:9000")
+	}
 	t.Logf("output: scheme=%q host=%q", target.Scheme, target.Host)
 }
 
