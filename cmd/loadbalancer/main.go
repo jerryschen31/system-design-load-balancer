@@ -25,7 +25,7 @@ func parseBackendURL(raw string) (*url.URL, error) {
 		return nil, fmt.Errorf("parse backend URL: %w", err)
 	}
 	if target.Host == "" {
-		return nil, fmt.Errorf("backend URL must include a host, for example http://localhost:9000")
+		return nil, fmt.Errorf("backend URL must include a host (for example http://hostname:port)")
 	}
 	switch strings.ToLower(target.Scheme) {
 	case "http", "https":
