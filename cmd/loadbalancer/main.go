@@ -5,11 +5,13 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"log"
 	"net/http"
 	"net/url"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -17,12 +19,28 @@ import (
 	"github.com/jerryschen31/system-design-load-balancer/internal/proxy"
 )
 
+func parseBackendURL(raw string) (*url.URL, error) {
+	target, err := url.Parse(raw)
+	if err != nil {
+		return nil, fmt.Errorf("parse backend URL: %w", err)
+	}
+	if target.Host == "" {
+		return nil, fmt.Errorf("backend URL must include a host, for example http://localhost:9000")
+	}
+	switch strings.ToLower(target.Scheme) {
+	case "http", "https":
+		return target, nil
+	default:
+		return nil, fmt.Errorf("backend URL scheme must be http or https")
+	}
+}
+
 func main() {
 	listenAddr := flag.String("listen", ":8080", "address for the load balancer to listen on")
 	backendAddr := flag.String("backend", "http://localhost:9000", "backend server URL to forward requests to")
 	flag.Parse()
 
-	target, err := url.Parse(*backendAddr)
+	target, err := parseBackendURL(*backendAddr)
 	if err != nil {
 		log.Fatalf("invalid backend URL %q: %v", *backendAddr, err)
 	}
@@ -37,9 +55,9 @@ func main() {
 	}
 
 	go func() {
-		logger.Printf("load balancer listening on %s, forwarding to %s", *listenAddr, target)
+		logger.Printf("load balancer listening on %s, forwarding to %s", *listenAddr, target.String())
 		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Fatalf("server error: %v", err)
+			logger.Fatalf("server error: %v", err)
 		}
 	}()
 

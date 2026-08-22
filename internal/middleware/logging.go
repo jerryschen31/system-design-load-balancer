@@ -4,6 +4,7 @@
 package middleware
 
 import (
+	"io"
 	"log"
 	"net/http"
 	"time"
@@ -25,6 +26,10 @@ func (r *statusRecorder) WriteHeader(status int) {
 // Logging returns middleware that logs method, path, status, and latency
 // for every request that passes through the handler it wraps.
 func Logging(logger *log.Logger) func(http.Handler) http.Handler {
+	if logger == nil {
+		logger = log.New(io.Discard, "", 0)
+	}
+
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}

@@ -25,6 +25,7 @@ func newProxyServer(t *testing.T, backendURL string) *httptest.Server {
 func TestForwardsRequestToBackend(t *testing.T) {
 	var gotMethod, gotPath string
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Logf("backend step: received %s %s", r.Method, r.URL.Path)
 		gotMethod = r.Method
 		gotPath = r.URL.Path
 		w.WriteHeader(http.StatusTeapot)
@@ -34,6 +35,7 @@ func TestForwardsRequestToBackend(t *testing.T) {
 
 	lb := newProxyServer(t, backend.URL)
 	defer lb.Close()
+	t.Logf("input: client sends POST /widgets to load balancer %s; backend is %s", lb.URL, backend.URL)
 
 	resp, err := http.Post(lb.URL+"/widgets", "text/plain", nil)
 	if err != nil {
@@ -54,11 +56,13 @@ func TestForwardsRequestToBackend(t *testing.T) {
 	if string(body) != "hello from backend" {
 		t.Errorf("client got body %q, want %q", body, "hello from backend")
 	}
+	t.Logf("output: client got status %d and body %q", resp.StatusCode, string(body))
 }
 
 func TestClientCannotSpoofForwardedFor(t *testing.T) {
 	var gotXFF string
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Logf("backend step: saw X-Forwarded-For=%q", r.Header.Get("X-Forwarded-For"))
 		gotXFF = r.Header.Get("X-Forwarded-For")
 	}))
 	defer backend.Close()
@@ -69,6 +73,7 @@ func TestClientCannotSpoofForwardedFor(t *testing.T) {
 	req, _ := http.NewRequest(http.MethodGet, lb.URL+"/", nil)
 	// A malicious or misconfigured client claims to be a different IP.
 	req.Header.Set("X-Forwarded-For", "6.6.6.6")
+	t.Logf("input: client sends X-Forwarded-For=%q to %s", req.Header.Get("X-Forwarded-For"), lb.URL)
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -82,12 +87,14 @@ func TestClientCannotSpoofForwardedFor(t *testing.T) {
 	if gotXFF == "" {
 		t.Errorf("backend saw empty X-Forwarded-For; the proxy should set it to the real client address")
 	}
+	t.Logf("output: backend received rewritten X-Forwarded-For=%q", gotXFF)
 }
 
 func TestHopByHopHeaderNotForwarded(t *testing.T) {
 	var gotConnectionHeader string
 	sawKeepAliveHeader := false
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Logf("backend step: Connection=%q Keep-Alive present=%t", r.Header.Get("Connection"), r.Header.Get("Keep-Alive") != "")
 		gotConnectionHeader = r.Header.Get("Connection")
 		_, sawKeepAliveHeader = r.Header["Keep-Alive"]
 	}))
@@ -101,6 +108,7 @@ func TestHopByHopHeaderNotForwarded(t *testing.T) {
 	// stripped before forwarding, not passed through to the backend.
 	req.Header.Set("Connection", "Keep-Alive")
 	req.Header.Set("Keep-Alive", "timeout=5")
+	t.Logf("input: client sends Connection=%q and Keep-Alive=%q", req.Header.Get("Connection"), req.Header.Get("Keep-Alive"))
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -114,6 +122,7 @@ func TestHopByHopHeaderNotForwarded(t *testing.T) {
 	if sawKeepAliveHeader {
 		t.Errorf("backend saw Keep-Alive header, want it stripped as a hop-by-hop header")
 	}
+	t.Logf("output: backend saw Connection=%q Keep-Alive present=%t", gotConnectionHeader, sawKeepAliveHeader)
 }
 
 func TestBackendDownReturns502(t *testing.T) {
@@ -124,6 +133,7 @@ func TestBackendDownReturns502(t *testing.T) {
 	}
 	lb := httptest.NewServer(New(unreachable, newTestLogger()))
 	defer lb.Close()
+	t.Logf("input: backend %s is down; client sends GET / through load balancer %s", unreachable.String(), lb.URL)
 
 	resp, err := http.Get(lb.URL + "/")
 	if err != nil {
@@ -134,4 +144,27 @@ func TestBackendDownReturns502(t *testing.T) {
 	if resp.StatusCode != http.StatusBadGateway {
 		t.Errorf("got status %d, want %d (Bad Gateway) when backend is unreachable", resp.StatusCode, http.StatusBadGateway)
 	}
+	t.Logf("output: client got status %d", resp.StatusCode)
+}
+
+func TestNewAllowsNilLogger(t *testing.T) {
+	unreachable, err := url.Parse("http://127.0.0.1:1")
+	if err != nil {
+		t.Fatalf("parse unreachable URL: %v", err)
+	}
+
+	lb := httptest.NewServer(New(unreachable, nil))
+	defer lb.Close()
+	t.Logf("input: proxy.New(%s, nil)", unreachable.String())
+
+	resp, err := http.Get(lb.URL + "/")
+	if err != nil {
+		t.Fatalf("request through proxy failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Fatalf("got status %d, want %d", resp.StatusCode, http.StatusBadGateway)
+	}
+	t.Logf("output: client got status %d and the proxy did not panic", resp.StatusCode)
 }

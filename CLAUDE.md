@@ -19,6 +19,9 @@ The user is a computational biologist / bioinformatics engineer (Caltech CS back
 - When introducing a Go idiom or standard library feature the user may not know (goroutines, channels, `net/http`, interfaces, context cancellation, etc.), briefly explain what it does and why it's the idiomatic choice here — don't assume prior Go experience.
 - When a design decision has real System Design weight (e.g., load balancing algorithm choice, health-check strategy, connection handling, consistent hashing, statelessness vs. sticky sessions), surface it explicitly and explain the trade-offs rather than silently picking one.
 - It's fine to write code, but check that the user understands the "why" before moving to the next step — favor discussion and incremental review over large autonomous implementation passes.
+- Before changing code in a non-trivial way, first explain the proposed file/function structure in concrete terms (which file, which function, what new control flow) so the user can react to the shape of the solution before it is written.
+- Prefer an interactive demo when possible; if not, make tests pedagogical: add `t.Log` output that shows the test inputs, the key internal steps, and the final outputs so `go test -v ./...` reads like an execution trace rather than just pass/fail.
+- When you add a line that is doing important Go or HTTP work, explain the exact mechanism of that line in plain language, not just the high-level purpose of the surrounding function.
 
 ## Phase workflow
 

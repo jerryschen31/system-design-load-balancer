@@ -19,8 +19,10 @@ import (
 func TestStress_SlowBackendHasNoTimeout(t *testing.T) {
 	const backendDelay = 300 * time.Millisecond
 	const clientTimeout = 50 * time.Millisecond
+	t.Logf("input: backend sleeps for %s; client timeout is %s", backendDelay, clientTimeout)
 
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Log("backend step: request reached backend; backend is now sleeping")
 		time.Sleep(backendDelay)
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -40,6 +42,7 @@ func TestStress_SlowBackendHasNoTimeout(t *testing.T) {
 	if elapsed >= backendDelay {
 		t.Errorf("client waited %s (>= full backend delay of %s); expected the client's timeout (~%s) to cut it off first, proving the proxy itself never would have", elapsed, backendDelay, clientTimeout)
 	}
+	t.Logf("output: client returned after %s with error %v", elapsed, err)
 	t.Logf("KNOWN WEAKNESS: proxy has no timeout on backend responses (aborted after %s only because the client protected itself; backend needed %s). A hung backend can hold load balancer resources indefinitely.", elapsed, backendDelay)
 }
 
@@ -49,6 +52,7 @@ func TestStress_SlowBackendHasNoTimeout(t *testing.T) {
 func TestStress_ConcurrentRequestsHandledConcurrently(t *testing.T) {
 	const numRequests = 50
 	const perRequestDelay = 100 * time.Millisecond
+	t.Logf("input: %d concurrent requests; backend delay per request is %s", numRequests, perRequestDelay)
 
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(perRequestDelay)
@@ -91,6 +95,7 @@ func TestStress_ConcurrentRequestsHandledConcurrently(t *testing.T) {
 	if elapsed >= serialTime/2 {
 		t.Errorf("burst of %d requests took %s, expected well under the serial time of %s -- requests may not be handled concurrently", numRequests, elapsed, serialTime)
 	}
+	t.Logf("output: burst finished in %s (serial time would have been %s)", elapsed, serialTime)
 }
 
 // TestStress_BurstAgainstUnreachableBackend checks that the load balancer
@@ -99,6 +104,7 @@ func TestStress_ConcurrentRequestsHandledConcurrently(t *testing.T) {
 // its only backend is down.
 func TestStress_BurstAgainstUnreachableBackend(t *testing.T) {
 	const numRequests = 50
+	t.Logf("input: %d concurrent requests against a load balancer whose only backend is down", numRequests)
 
 	unreachable, err := url.Parse("http://127.0.0.1:1")
 	if err != nil {
@@ -130,4 +136,5 @@ func TestStress_BurstAgainstUnreachableBackend(t *testing.T) {
 			t.Errorf("got status %d, want %d for every request in the burst against a down backend", status, http.StatusBadGateway)
 		}
 	}
+	t.Logf("output: every observed response was %d", http.StatusBadGateway)
 }
