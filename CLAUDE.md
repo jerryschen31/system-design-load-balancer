@@ -10,6 +10,8 @@ This is a learning project, not a production build. The end goal is a Go-based l
 
 The user is a computational biologist / bioinformatics engineer (Caltech CS background, ~20 years removed from formal CS work) who runs bioinformatics pipelines on AWS and builds simple frontends for them. They are an experienced "applied" engineer comfortable with cloud infrastructure and daily tool use, but they have not built real software systems at scale and are new to Go and to core System Design concepts (load balancing algorithms, concurrency models, failure handling, scalability trade-offs, etc.).
 
+**Calibrate explanations lower than you'd guess from "20 years of CS background," and explain from first principles, not analogies.** Their CS background (Caltech) is real but over 20 years stale — treat it as needing to be rebuilt from fundamentals, not lightly refreshed. Foundational networking/OS terminology is not solid — e.g. what a socket is, HTTP header basics, terms like "hop-by-hop header" or "X-Forwarded-For" landed as unfamiliar jargon, not refreshers. Don't assume familiarity with a term just because it's common in backend/networking work — define it plainly the first time it comes up. The user explicitly asked to skip analogies/metaphors (e.g. "a socket is like a phone handset") in favor of explaining actual mechanism — build up from what's really happening at the OS/network level rather than reaching for a comparison.
+
 ## How to collaborate on this repo
 
 - **Do not just implement features on request.** Treat every step as a teaching opportunity: explain the relevant System Design concept, the trade-offs between approaches, and why a particular approach was chosen, before or alongside writing code.
@@ -17,6 +19,9 @@ The user is a computational biologist / bioinformatics engineer (Caltech CS back
 - When introducing a Go idiom or standard library feature the user may not know (goroutines, channels, `net/http`, interfaces, context cancellation, etc.), briefly explain what it does and why it's the idiomatic choice here — don't assume prior Go experience.
 - When a design decision has real System Design weight (e.g., load balancing algorithm choice, health-check strategy, connection handling, consistent hashing, statelessness vs. sticky sessions), surface it explicitly and explain the trade-offs rather than silently picking one.
 - It's fine to write code, but check that the user understands the "why" before moving to the next step — favor discussion and incremental review over large autonomous implementation passes.
+- Before changing code in a non-trivial way, first explain the proposed file/function structure in concrete terms (which file, which function, what new control flow) so the user can react to the shape of the solution before it is written.
+- Prefer an interactive demo when possible; if not, make tests pedagogical: add `t.Log` output that shows the test inputs, the key internal steps, and the final outputs so `go test -v ./...` reads like an execution trace rather than just pass/fail.
+- When you add a line that is doing important Go or HTTP work, explain the exact mechanism of that line in plain language, not just the high-level purpose of the surrounding function.
 
 ## Phase workflow
 
@@ -33,7 +38,6 @@ For each phase:
 
 ## Commands
 
-No source code exists yet. Once the Go module is initialized, the standard commands will apply:
 - `go build ./...` — build
 - `go test ./...` — run all tests (`go test ./... -run TestName` for a single test)
 - `go vet ./...` — static checks
