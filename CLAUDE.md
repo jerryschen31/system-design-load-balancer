@@ -22,6 +22,7 @@ The user is a computational biologist / bioinformatics engineer (Caltech CS back
 - Before changing code in a non-trivial way, first explain the proposed file/function structure in concrete terms (which file, which function, what new control flow) so the user can react to the shape of the solution before it is written.
 - Prefer an interactive demo when possible; if not, make tests pedagogical: add `t.Log` output that shows the test inputs, the key internal steps, and the final outputs so `go test -v ./...` reads like an execution trace rather than just pass/fail.
 - When you add a line that is doing important Go or HTTP work, explain the exact mechanism of that line in plain language, not just the high-level purpose of the surrounding function.
+- Whenever a concept can be observed hands-on, give the user a concrete scenario to run themselves locally — real backend processes, real concurrent requests via curl loops or a load-testing tool, killing a process mid-test, etc. — rather than only describing the behavior or pointing at automated test output. This includes proposing small tools to install (e.g. `hey`/`ab` for load generation, a tiny stand-in backend binary) when that's what it takes to make the simulation concrete. The manual curl walkthrough in phase 1 (see `prompts/20260821-session-2-phase-1.md`) was the most effective learning moment so far — treat that as the bar, not an exception.
 
 ## Phase workflow
 

@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jerryschen31/system-design-load-balancer/internal/balancer"
 	"github.com/jerryschen31/system-design-load-balancer/internal/middleware"
 	"github.com/jerryschen31/system-design-load-balancer/internal/proxy"
 )
@@ -35,19 +36,55 @@ func parseBackendURL(raw string) (*url.URL, error) {
 	}
 }
 
+// parseBackendURLs validates every raw backend URL and preserves the order
+// they were given in -- that order is what the round-robin cycle follows.
+func parseBackendURLs(raw []string) ([]*url.URL, error) {
+	if len(raw) == 0 {
+		return nil, fmt.Errorf("at least one -backend is required")
+	}
+	targets := make([]*url.URL, 0, len(raw))
+	for _, r := range raw {
+		target, err := parseBackendURL(r)
+		if err != nil {
+			return nil, fmt.Errorf("invalid backend URL %q: %w", r, err)
+		}
+		targets = append(targets, target)
+	}
+	return targets, nil
+}
+
+// backendFlag collects every occurrence of a repeated command-line flag.
+// flag.String and friends only keep the last value if a flag is given more
+// than once; implementing flag.Value's two methods (String, Set) instead
+// lets us register our own flag type with flag.Var, and the flag package
+// calls Set once per occurrence on the command line -- so "-backend a
+// -backend b" calls Set("a") then Set("b"), and we just append each time.
+type backendFlag []string
+
+func (b *backendFlag) String() string {
+	return strings.Join(*b, ",")
+}
+
+func (b *backendFlag) Set(value string) error {
+	*b = append(*b, value)
+	return nil
+}
+
 func main() {
 	listenAddr := flag.String("listen", ":8080", "address for the load balancer to listen on")
-	backendAddr := flag.String("backend", "http://localhost:9000", "backend server URL to forward requests to")
+	var backends backendFlag
+	flag.Var(&backends, "backend", "backend server URL to forward requests to (repeatable, e.g. -backend http://localhost:9001 -backend http://localhost:9002)")
 	flag.Parse()
 
-	target, err := parseBackendURL(*backendAddr)
+	targets, err := parseBackendURLs(backends)
 	if err != nil {
-		log.Fatalf("invalid backend URL %q: %v", *backendAddr, err)
+		log.Fatalf("%v", err)
 	}
 
 	logger := log.New(os.Stdout, "", log.LstdFlags)
 
-	handler := middleware.Logging(logger)(proxy.New(target, logger))
+	rr := balancer.NewRoundRobin(targets)
+	handler := middleware.Logging(logger)(proxy.New(rr, logger))
 
 	server := &http.Server{
 		Addr:    *listenAddr,
@@ -55,7 +92,7 @@ func main() {
 	}
 
 	go func() {
-		logger.Printf("load balancer listening on %s, forwarding to %s", *listenAddr, target.String())
+		logger.Printf("load balancer listening on %s, forwarding to %s", *listenAddr, backends.String())
 		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			logger.Fatalf("server error: %v", err)
 		}

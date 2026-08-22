@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"sync"
 	"testing"
 	"time"
@@ -106,11 +105,7 @@ func TestStress_BurstAgainstUnreachableBackend(t *testing.T) {
 	const numRequests = 50
 	t.Logf("input: %d concurrent requests against a load balancer whose only backend is down", numRequests)
 
-	unreachable, err := url.Parse("http://127.0.0.1:1")
-	if err != nil {
-		t.Fatalf("parse unreachable URL: %v", err)
-	}
-	lb := httptest.NewServer(New(unreachable, newTestLogger()))
+	lb := httptest.NewServer(New(singleBackend(t, "http://127.0.0.1:1"), newTestLogger()))
 	defer lb.Close()
 
 	var wg sync.WaitGroup

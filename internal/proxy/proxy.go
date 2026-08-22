@@ -7,22 +7,28 @@ import (
 	"log"
 	"net/http"
 	"net/http/httputil"
-	"net/url"
+
+	"github.com/jerryschen31/system-design-load-balancer/internal/balancer"
 )
 
-// New builds a reverse proxy that forwards every request to target.
-//
-// It has no load-balancing logic yet: there is exactly one backend, so
-// there is nothing to choose between. That arrives once Phase 2 introduces
-// more than one backend.
-func New(target *url.URL, logger *log.Logger) *httputil.ReverseProxy {
+// New builds a reverse proxy that forwards every request to a backend
+// chosen by b. Each request picks its target independently by calling
+// b.Next(), so which backend handles a given request is entirely up to
+// the balancer's selection policy (round-robin, and later phases' other
+// strategies), not anything the proxy itself decides.
+func New(b balancer.Balancer, logger *log.Logger) *httputil.ReverseProxy {
 	if logger == nil {
 		logger = log.New(io.Discard, "", 0)
 	}
 
 	return &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
-			pr.SetURL(target)
+			// Rewrite runs once per incoming request, on that request's own
+			// goroutine, before it's forwarded. Calling b.Next() here --
+			// rather than resolving the target once outside New -- is what
+			// makes every request independently eligible for a different
+			// backend.
+			pr.SetURL(b.Next())
 			pr.SetXForwarded()
 		},
 		ErrorLog: logger,
