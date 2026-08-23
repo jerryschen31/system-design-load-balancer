@@ -32,7 +32,7 @@ For each phase:
 
 1. Branch off `build`, named `phase-N-short-description` (e.g. `phase-1-single-backend-proxy`).
 2. Build the increment for that phase (see "How to collaborate" above — teach as you go, keep it incremental).
-3. Write functional tests, and also non-functional/stress tests that deliberately try to break or degrade the load balancer (e.g. backend timeouts, slow/hanging connections, backend crashes mid-request, connection floods, thundering herd on health-check recovery) to surface real weaknesses.
+3. Write functional tests, and also non-functional/stress tests that deliberately try to break or degrade the load balancer (e.g. backend timeouts, slow/hanging connections, backend crashes mid-request, connection floods, thundering herd on health-check recovery) to surface real weaknesses. Once tests are green, capture a full `go test -v -race ./...` run as `outputs/tests/phase-N-short-description.md` (raw, readable output — not just a pass/fail summary), so the user has a durable, reviewable record of what was actually run.
 4. Write up `notes/phase-N-short-description.md` using `notes/TEMPLATE.md` — capture what was built, the System Design concepts/trade-offs learned, a curated summary of the key design discussion (not a raw transcript dump — a distilled narrative of the decisions and why), and the test results including weaknesses/vulnerabilities found and what's deferred to a later phase.
 5. Open a PR from the phase branch into `build`. The PR description should summarize the same points (what/why/tests/known weaknesses) so the PR itself is a standalone artifact; link the notes file from it.
 6. Only commit or open the PR when the user asks — don't do this proactively at the end of a phase without confirmation.
