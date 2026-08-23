@@ -173,6 +173,34 @@ func TestNewAllowsNilLogger(t *testing.T) {
 	t.Logf("output: client got status %d and the proxy did not panic", resp.StatusCode)
 }
 
+// TestNoHealthyBackendsReturns502 exercises the path added for health
+// checks: a balancer that has a backend but has marked it unhealthy must
+// behave, from the client's perspective, exactly like a backend that's
+// simply down -- a clean 502, not a hang or a panic.
+func TestNoHealthyBackendsReturns502(t *testing.T) {
+	target, err := url.Parse("http://127.0.0.1:1") // never actually dialed
+	if err != nil {
+		t.Fatalf("parse backend URL: %v", err)
+	}
+	rr := balancer.NewRoundRobin([]*url.URL{target})
+	rr.SetHealthy(target, false)
+	t.Logf("input: balancer's only backend (%s) marked unhealthy", target)
+
+	lb := httptest.NewServer(New(rr, newTestLogger()))
+	defer lb.Close()
+
+	resp, err := http.Get(lb.URL)
+	if err != nil {
+		t.Fatalf("request to load balancer failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	t.Logf("output: client got status %d", resp.StatusCode)
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Fatalf("got status %d, want %d", resp.StatusCode, http.StatusBadGateway)
+	}
+}
+
 func TestNewPanicsOnNilBalancer(t *testing.T) {
 	t.Log("input: proxy.New(nil, nil)")
 

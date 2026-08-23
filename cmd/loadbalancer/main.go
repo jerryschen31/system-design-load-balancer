@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/jerryschen31/system-design-load-balancer/internal/balancer"
+	"github.com/jerryschen31/system-design-load-balancer/internal/healthcheck"
 	"github.com/jerryschen31/system-design-load-balancer/internal/middleware"
 	"github.com/jerryschen31/system-design-load-balancer/internal/proxy"
 )
@@ -74,6 +75,9 @@ func main() {
 	listenAddr := flag.String("listen", ":8080", "address for the load balancer to listen on")
 	var backends backendFlag
 	flag.Var(&backends, "backend", "backend server URL to forward requests to (repeatable, e.g. -backend http://localhost:9001 -backend http://localhost:9002)")
+	healthCheckInterval := flag.Duration("health-check-interval", 5*time.Second, "how often to actively poll each backend's health check path")
+	healthCheckTimeout := flag.Duration("health-check-timeout", 2*time.Second, "how long a single health check probe may take before it counts as a failure")
+	healthCheckPath := flag.String("health-check-path", "/health", "path to request on each backend for health checks")
 	flag.Parse()
 
 	targets, err := parseBackendURLs(backends)
@@ -91,6 +95,16 @@ func main() {
 		Handler: handler,
 	}
 
+	// healthCtx controls the health checker's polling goroutines
+	// specifically. It's cancelled on the same shutdown signal as the
+	// HTTP server below, so the checker stops polling backends rather
+	// than continuing to run after the load balancer itself has stopped
+	// accepting connections.
+	healthCtx, cancelHealth := context.WithCancel(context.Background())
+	defer cancelHealth()
+	checker := healthcheck.NewChecker(targets, *healthCheckInterval, *healthCheckTimeout, *healthCheckPath, rr.SetHealthy, logger)
+	checker.Start(healthCtx)
+
 	go func() {
 		logger.Printf("load balancer listening on %s, forwarding to %s", *listenAddr, backends.String())
 		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -103,6 +117,7 @@ func main() {
 	<-stop
 
 	logger.Println("shutting down...")
+	cancelHealth()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := server.Shutdown(ctx); err != nil {
