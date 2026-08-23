@@ -17,6 +17,13 @@ import (
 // the balancer's selection policy (round-robin, and later phases' other
 // strategies), not anything the proxy itself decides.
 func New(b balancer.Balancer, logger *log.Logger) *httputil.ReverseProxy {
+	if b == nil {
+		// Fail at construction, not on the first request: a nil balancer
+		// would otherwise panic inside Rewrite on whichever goroutine
+		// happens to handle the first incoming request, which is a much
+		// harder failure to trace back to its actual cause.
+		panic("proxy: New requires a non-nil Balancer")
+	}
 	if logger == nil {
 		logger = log.New(io.Discard, "", 0)
 	}

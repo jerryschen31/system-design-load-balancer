@@ -26,11 +26,17 @@ type RoundRobin struct {
 }
 
 // NewRoundRobin builds a RoundRobin over backends, which must be non-empty.
+// The slice is copied, so later mutations the caller makes to backends (a
+// reorder, an append) can't reach into the balancer's internal state --
+// without this, such a mutation would be an unsynchronized write racing
+// against every concurrent Next() call reading the slice.
 func NewRoundRobin(backends []*url.URL) *RoundRobin {
 	if len(backends) == 0 {
 		panic("balancer: NewRoundRobin requires at least one backend")
 	}
-	return &RoundRobin{backends: backends}
+	owned := make([]*url.URL, len(backends))
+	copy(owned, backends)
+	return &RoundRobin{backends: owned}
 }
 
 // Next returns the next backend in the cycle. Safe to call concurrently

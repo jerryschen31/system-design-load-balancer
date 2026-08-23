@@ -35,6 +35,30 @@ func TestRoundRobinCyclesInOrder(t *testing.T) {
 	t.Log("output: cycle wrapped correctly past the end of the backend list twice")
 }
 
+// TestNewRoundRobinCopiesBackends proves NewRoundRobin isn't aliasing the
+// caller's slice: mutating the original slice after construction must not
+// change what the balancer hands out.
+func TestNewRoundRobinCopiesBackends(t *testing.T) {
+	original := []*url.URL{
+		mustURL(t, "http://backend-a"),
+		mustURL(t, "http://backend-b"),
+	}
+	t.Logf("input: construct RoundRobin over %v, then mutate the original slice", original)
+
+	rr := NewRoundRobin(original)
+
+	// Mutate the caller's slice after handing it to NewRoundRobin -- this
+	// simulates a caller reusing or reordering its own backend list later.
+	original[0] = mustURL(t, "http://attacker-controlled")
+	t.Logf("step: caller's original slice[0] is now %s", original[0])
+
+	got := rr.Next()
+	t.Logf("output: rr.Next() returned %s", got)
+	if got.String() != "http://backend-a" {
+		t.Fatalf("got %s, want http://backend-a -- NewRoundRobin must not alias the caller's slice", got)
+	}
+}
+
 // TestRoundRobinConcurrentCallsStayBalanced fires many concurrent calls to
 // Next() from many goroutines and checks that the calls split *exactly*
 // evenly across backends. That exactness is the point: round-robin's

@@ -172,3 +172,17 @@ func TestNewAllowsNilLogger(t *testing.T) {
 	}
 	t.Logf("output: client got status %d and the proxy did not panic", resp.StatusCode)
 }
+
+func TestNewPanicsOnNilBalancer(t *testing.T) {
+	t.Log("input: proxy.New(nil, nil)")
+
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("expected New to panic on a nil Balancer, so the failure surfaces at construction instead of on the first request")
+		}
+		t.Logf("output: New panicked as expected: %v", r)
+	}()
+
+	New(nil, nil)
+}
