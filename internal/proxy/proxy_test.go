@@ -7,19 +7,30 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"testing"
+
+	"github.com/jerryschen31/system-design-load-balancer/internal/balancer"
 )
 
 func newTestLogger() *log.Logger {
 	return log.New(io.Discard, "", 0)
 }
 
-func newProxyServer(t *testing.T, backendURL string) *httptest.Server {
+// singleBackend wraps one backend URL in a round-robin balancer that has
+// nothing to choose between -- the tests in this file exercise proxy
+// mechanics (headers, error handling, streaming), not balancer selection,
+// so a single-backend balancer keeps them focused on that.
+func singleBackend(t *testing.T, backendURL string) balancer.Balancer {
 	t.Helper()
 	target, err := url.Parse(backendURL)
 	if err != nil {
 		t.Fatalf("parse backend URL: %v", err)
 	}
-	return httptest.NewServer(New(target, newTestLogger()))
+	return balancer.NewRoundRobin([]*url.URL{target})
+}
+
+func newProxyServer(t *testing.T, backendURL string) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(New(singleBackend(t, backendURL), newTestLogger()))
 }
 
 func TestForwardsRequestToBackend(t *testing.T) {
@@ -127,13 +138,10 @@ func TestHopByHopHeaderNotForwarded(t *testing.T) {
 
 func TestBackendDownReturns502(t *testing.T) {
 	// A backend URL that nothing is listening on: connection refused.
-	unreachable, err := url.Parse("http://127.0.0.1:1")
-	if err != nil {
-		t.Fatalf("parse unreachable URL: %v", err)
-	}
-	lb := httptest.NewServer(New(unreachable, newTestLogger()))
+	const unreachableURL = "http://127.0.0.1:1"
+	lb := httptest.NewServer(New(singleBackend(t, unreachableURL), newTestLogger()))
 	defer lb.Close()
-	t.Logf("input: backend %s is down; client sends GET / through load balancer %s", unreachable.String(), lb.URL)
+	t.Logf("input: backend %s is down; client sends GET / through load balancer %s", unreachableURL, lb.URL)
 
 	resp, err := http.Get(lb.URL + "/")
 	if err != nil {
@@ -148,14 +156,10 @@ func TestBackendDownReturns502(t *testing.T) {
 }
 
 func TestNewAllowsNilLogger(t *testing.T) {
-	unreachable, err := url.Parse("http://127.0.0.1:1")
-	if err != nil {
-		t.Fatalf("parse unreachable URL: %v", err)
-	}
-
-	lb := httptest.NewServer(New(unreachable, nil))
+	const unreachableURL = "http://127.0.0.1:1"
+	lb := httptest.NewServer(New(singleBackend(t, unreachableURL), nil))
 	defer lb.Close()
-	t.Logf("input: proxy.New(%s, nil)", unreachable.String())
+	t.Logf("input: proxy.New(%s, nil)", unreachableURL)
 
 	resp, err := http.Get(lb.URL + "/")
 	if err != nil {
@@ -167,4 +171,18 @@ func TestNewAllowsNilLogger(t *testing.T) {
 		t.Fatalf("got status %d, want %d", resp.StatusCode, http.StatusBadGateway)
 	}
 	t.Logf("output: client got status %d and the proxy did not panic", resp.StatusCode)
+}
+
+func TestNewPanicsOnNilBalancer(t *testing.T) {
+	t.Log("input: proxy.New(nil, nil)")
+
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("expected New to panic on a nil Balancer, so the failure surfaces at construction instead of on the first request")
+		}
+		t.Logf("output: New panicked as expected: %v", r)
+	}()
+
+	New(nil, nil)
 }
