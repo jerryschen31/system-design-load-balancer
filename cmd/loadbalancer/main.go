@@ -99,24 +99,13 @@ func main() {
 		Handler: handler,
 	}
 
-	// healthCtx controls the health checker's polling goroutines
-	// specifically. It's cancelled on the same shutdown signal as the
-	// HTTP server below, so the checker stops polling backends rather
-	// than continuing to run after the load balancer itself has stopped
-	// accepting connections.
+	// healthCtx controls the health checker's polling goroutines specifically. It's cancelled on the same shutdown signal as the HTTP server below, so the checker stops polling backends rather than continuing to run after the load balancer itself has stopped accepting connections.
 	healthCtx, cancelHealth := context.WithCancel(context.Background())
 
-	// defer cancelHealth(): defer schedules a function call to run when the enclosing function (main, here) returns — regardless of how 
-	// it returns (normal fall-through, or via a later return). It's a safety net: if main exits some other way than reaching line 126 
-	// normally, cancelHealth still fires and no goroutine leaks polling forever. Note it's also called explicitly at line 120 during 
-	// normal shutdown — the defer is the backstop, not the primary mechanism.
+	// defer cancelHealth(): defer schedules a function call to run when the enclosing function (main, here) returns — regardless of how it returns (normal fall-through, or via a later return). It's a safety net: if main exits some other way than reaching line 126 normally, cancelHealth still fires and no goroutine leaks polling forever. Note it's also called explicitly at line 120 during normal shutdown — the defer is the backstop, not the primary mechanism.
 	defer cancelHealth()
 
-	// rr.SetHealthy (a method value — passing rr.SetHealthy as an argument, without calling it, packages up "call this method on this 
-	// particular rr" as a plain function value) is passed in as the onResult func(backend *url.URL, healthy bool) callback parameter — 
-	// the health checker doesn't know or care about RoundRobin internals; it just calls this function whenever a probe succeeds or fails, 
-	// and RoundRobin updates its own state. That's a deliberate decoupling: the checker's only contract with the balancer is "call me back 
-	// with a URL and a bool."
+	// rr.SetHealthy (a method value — passing rr.SetHealthy as an argument, without calling it, packages up "call this method on this particular rr" as a plain function value) is passed in as the onResult func(backend *url.URL, healthy bool) callback parameter — the health checker doesn't know or care about RoundRobin internals; it just calls this function whenever a probe succeeds or fails, and RoundRobin updates its own state. That's a deliberate decoupling: the checker's only contract with the balancer is "call me back with a URL and a bool."
 	checker := healthcheck.NewChecker(targets, *healthCheckInterval, *healthCheckTimeout, *healthCheckPath, rr.SetHealthy, logger)
 	checker.Start(healthCtx)
 
