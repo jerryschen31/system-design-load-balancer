@@ -1,21 +1,23 @@
 # Phase 4b Test Report: Bounded, FIFO-fair wait queue for the concurrency limiter
 
-**Source:** uncommitted work on `phase-4a-timeouts-backpressure` (phase 4b was built as a continuation of the same branch, layered on top of phase 4a), based on `e7b55f5` on `build`
+**Source:** `phase-4a-timeouts-backpressure` (phase 4b was built as a continuation of the same branch, layered on top of phase 4a), PR #5 into `build`, updated after GitHub Copilot's automated review
 **Command:** `go test -v -race -count=1 ./cmd/... ./internal/...`
-**Result:** 59 passed, 0 failed, across 6 packages
+**Result:** 60 passed, 0 failed, across 6 packages
 
 | Package | Result | Duration |
 |---|---|---|
-| `cmd/echobackend` | ok | 1.28s |
-| `cmd/loadbalancer` | ok | 2.17s |
-| `internal/balancer` | ok | 1.85s |
+| `cmd/echobackend` | ok | 1.27s |
+| `cmd/loadbalancer` | ok | 2.25s |
+| `internal/balancer` | ok | 1.56s |
 | `internal/healthcheck` | ok | 2.87s |
-| `internal/middleware` | ok | 2.40s |
-| `internal/proxy` | ok | 3.49s |
+| `internal/middleware` | ok | 8.34s |
+| `internal/proxy` | ok | 3.48s |
 
 Scoped to `./cmd/... ./internal/...` for the same reason as phase 4a's report: `scratch/` contains pre-existing standalone exploratory files that don't build as part of the module (confirmed via `git stash` before phase 4a work began).
 
-The new FIFO-queue tests (`TestLimiterAcquireIsFIFO`, `TestLimiterGiveUpOnClientCancelFreesQueueSlot`, and the three `TestMaxConcurrentQueue*` tests) were additionally run 10x in a row under `-race` (`go test -race -count=10 -run 'TestLimiterAcquireIsFIFO|TestLimiterGiveUpOnClientCancelFreesQueueSlot|TestMaxConcurrentQueue'`) to check for flakiness after a real ordering bug was found and fixed in the first draft of `TestLimiterAcquireIsFIFO` (see `notes/phase-4b-bounded-queue.md` for what the bug was and why it happened) — all 10 repeats passed.
+**Updated after PR review** (see `notes/phase-4b-bounded-queue.md` §7 for the full story): GitHub Copilot's automated review caught a real, permanent-slot-leak race between `release()` and `giveUp()` in `internal/middleware/concurrency.go` — `release()` was closing a waiter's signal channel *after* releasing its lock, leaving a window where a waiter timing out at the same instant could conclude "not granted" and walk away, even though `release()` had already committed the slot to it, permanently. Fixed by moving the channel close inside the same critical section. A new regression test, `TestLimiterReleaseGiveUpRaceDoesNotLeakSlots` (5000 iterations racing `release()` against a waiter cancelling with no ordering imposed between them), was written and *empirically confirmed to catch the original bug* — it was run against the pre-fix code first and failed at iteration 4540 with the exact predicted symptom (the limiter could no longer grant new acquires), then passed cleanly after the fix. Also fixed two smaller review findings: a busy-poll loop in test helper `waitForQueueLen` now sleeps briefly between checks instead of spinning, and two tests that read a response body with a single `Read()` call (technically allowed to return a short read without hitting EOF) now use `io.ReadAll`.
+
+The FIFO-queue tests (`TestLimiterAcquireIsFIFO`, `TestLimiterGiveUpOnClientCancelFreesQueueSlot`, `TestLimiterReleaseGiveUpRaceDoesNotLeakSlots`, and the three `TestMaxConcurrentQueue*` tests) were additionally run 10x in a row under `-race` to check for flakiness — all repeats passed. (`TestLimiterAcquireIsFIFO` itself required one prior fix, during original development rather than review: its first draft had a race in the *test's own* synchronization, unrelated to the algorithm — see notes for the full explanation.)
 
 Generated on 2026-08-24 directly from the working branch. See `notes/phase-4b-bounded-queue.md` for the narrative writeup this output supports, including the manual localhost walkthrough covering all four queue outcomes (immediate grant, queued-then-admitted, queued-then-timed-out, queue-full-immediate-reject) against real processes.
 
@@ -69,7 +71,7 @@ Generated on 2026-08-24 directly from the working branch. See `notes/phase-4b-bo
     --- PASS: TestParseSleepSeconds/non-numeric_is_an_error (0.00s)
 === RUN   TestSleepHandlerRespondsAfterElapsed
     main_test.go:148: input: GET /sleep?seconds=0 -- should return 200 essentially immediately
-    main_test.go:156: output: status=200 body="slept 0s\n" elapsed=32.625µs
+    main_test.go:156: output: status=200 body="slept 0s\n" elapsed=53.5µs
 --- PASS: TestSleepHandlerRespondsAfterElapsed (0.00s)
 === RUN   TestSleepHandlerRejectsInvalidSeconds
     main_test.go:168: input: GET /sleep?seconds=nope
@@ -80,23 +82,23 @@ Generated on 2026-08-24 directly from the working branch. See `notes/phase-4b-bo
     main_test.go:207: output: handler returned promptly on the cancellation path; body="" (empty means it never reached the normal-completion branch)
 --- PASS: TestSleepHandlerCancelledByContext (0.00s)
 PASS
-ok  	github.com/jerryschen31/system-design-load-balancer/cmd/echobackend	1.279s
+ok  	github.com/jerryschen31/system-design-load-balancer/cmd/echobackend	1.271s
 === RUN   TestIntegration_ChecksRouteAroundUnhealthyBackend
-    integration_test.go:102: input: 2 backends, one (http://127.0.0.1:58738) already unhealthy before the checker ever runs
+    integration_test.go:102: input: 2 backends, one (http://127.0.0.1:61389) already unhealthy before the checker ever runs
     integration_test.go:121: output: good backend got 30 requests, unhealthy backend got 0
---- PASS: TestIntegration_ChecksRouteAroundUnhealthyBackend (0.12s)
+--- PASS: TestIntegration_ChecksRouteAroundUnhealthyBackend (0.11s)
 === RUN   TestStress_RecoveredBackendImmediatelyGetsFullShare
-    integration_test.go:151: input: 3 backends; backend 0 (http://127.0.0.1:58792) starts unhealthy, 1 and 2 start healthy
+    integration_test.go:151: input: 3 backends; backend 0 (http://127.0.0.1:61445) starts unhealthy, 1 and 2 start healthy
     integration_test.go:183: step: before recovery, backend 0 got 0 of 30 requests
     integration_test.go:189: step: backend 0 flipped to healthy
     integration_test.go:192: step: checker confirmed backend 0 healthy again
     integration_test.go:201: output: on the very first burst after recovery was detected, backend 0 received 30 of 90 requests (an even share is 30)
     integration_test.go:205: KNOWN WEAKNESS: a recovered backend receives its full concurrent traffic share the instant it's marked healthy, with no gradual ramp-up. A backend still warming up after recovery (cold cache, JIT warmup, reconnecting to a database) can be knocked back down immediately.
---- PASS: TestStress_RecoveredBackendImmediatelyGetsFullShare (0.17s)
+--- PASS: TestStress_RecoveredBackendImmediatelyGetsFullShare (0.11s)
 === RUN   TestStress_ConcurrentTrafficSurvivesHealthFlapping
     integration_test.go:220: input: 2 backends, one flips healthy/unhealthy every 10ms while traffic runs
     integration_test.go:277: output: status distribution across 200 requests during flapping: map[200:200]
---- PASS: TestStress_ConcurrentTrafficSurvivesHealthFlapping (0.07s)
+--- PASS: TestStress_ConcurrentTrafficSurvivesHealthFlapping (0.03s)
 === RUN   TestIntegration_MaxConcurrentProtectsFullStack
     integration_test.go:307: input: maxConcurrent=4, one backend whose handler blocks until released
     integration_test.go:339: step: 4 requests confirmed in flight at the real backend, through the full stack
@@ -105,7 +107,7 @@ ok  	github.com/jerryschen31/system-design-load-balancer/cmd/echobackend	1.279s
 --- PASS: TestIntegration_MaxConcurrentProtectsFullStack (0.00s)
 === RUN   TestIntegration_QueueAdmitsNearMissRequest
     integration_test.go:400: input: maxConcurrent=2, each holder finishes in ~150ms; queueCapacity=1, queueWaitTimeout=5s (well above holderDelay)
-    integration_test.go:442: output: near-miss request -> status=200, waited 283.025083ms (holders took 304.056167ms total)
+    integration_test.go:442: output: near-miss request -> status=200, waited 282.640625ms (holders took 303.712666ms total)
 --- PASS: TestIntegration_QueueAdmitsNearMissRequest (0.30s)
 === RUN   TestParseBackendURL
     main_test.go:6: input: backend URL http://localhost:9000
@@ -132,7 +134,7 @@ ok  	github.com/jerryschen31/system-design-load-balancer/cmd/echobackend	1.279s
     main_test.go:74: output: invalid backend URL "not-a-valid-backend": backend URL must include a host (for example http://hostname:port)
 --- PASS: TestParseBackendURLsRejectsAnyInvalidEntry (0.00s)
 PASS
-ok  	github.com/jerryschen31/system-design-load-balancer/cmd/loadbalancer	2.169s
+ok  	github.com/jerryschen31/system-design-load-balancer/cmd/loadbalancer	2.250s
 === RUN   TestRoundRobinCyclesInOrder
     roundrobin_test.go:25: input: 3 backends, calling Next() 7 times in a row
     roundrobin_test.go:31: call 0: got http://backend-a (want http://backend-a)
@@ -153,7 +155,7 @@ ok  	github.com/jerryschen31/system-design-load-balancer/cmd/loadbalancer	2.169s
     roundrobin_test.go:83: input: 50 goroutines x 60 calls each = 3000 total calls across 3 backends
     roundrobin_test.go:105: distribution: map[http://backend-a:1000 http://backend-b:1000 http://backend-c:1000]
     roundrobin_test.go:114: output: every backend received exactly 1000 calls, confirming no update was lost across 50 concurrent goroutines
---- PASS: TestRoundRobinConcurrentCallsStayBalanced (0.01s)
+--- PASS: TestRoundRobinConcurrentCallsStayBalanced (0.00s)
 === RUN   TestNewRoundRobinStartsAllBackendsHealthy
     roundrobin_test.go:125: input: 2 fresh backends, no SetHealthy calls yet
     roundrobin_test.go:132: output: backends reached by Next(): map[http://backend-a:true http://backend-b:true]
@@ -174,7 +176,7 @@ ok  	github.com/jerryschen31/system-design-load-balancer/cmd/loadbalancer	2.169s
 === RUN   TestRoundRobinConcurrentSetHealthyAndNext
     roundrobin_test.go:223: input: 3 backends, concurrent SetHealthy flapping and Next() calls for 100ms
     roundrobin_test.go:265: output: no data race reported (run with -race to make this test meaningful)
---- PASS: TestRoundRobinConcurrentSetHealthyAndNext (0.15s)
+--- PASS: TestRoundRobinConcurrentSetHealthyAndNext (0.13s)
 === RUN   TestRoundRobinSetHealthyReportsWhetherStateChanged
     roundrobin_test.go:277: input: fresh balancer over [backend-a], which starts healthy
     roundrobin_test.go:282: step: SetHealthy(a, true) on an already-healthy backend -> changed=false
@@ -183,17 +185,17 @@ ok  	github.com/jerryschen31/system-design-load-balancer/cmd/loadbalancer	2.169s
     roundrobin_test.go:297: output: SetHealthy on an unrecognized backend -> changed=false
 --- PASS: TestRoundRobinSetHealthyReportsWhetherStateChanged (0.00s)
 PASS
-ok  	github.com/jerryschen31/system-design-load-balancer/internal/balancer	1.845s
+ok  	github.com/jerryschen31/system-design-load-balancer/internal/balancer	1.562s
 === RUN   TestCheckerDetectsHealthyBackend
-    healthcheck_test.go:48: input: backend at http://127.0.0.1:59269 answers /health with 200
+    healthcheck_test.go:48: input: backend at http://127.0.0.1:61760 answers /health with 200
     healthcheck_test.go:60: output: first check reported healthy=true
 --- PASS: TestCheckerDetectsHealthyBackend (0.00s)
 === RUN   TestCheckerDetectsUnhealthyStatus
-    healthcheck_test.go:71: input: backend at http://127.0.0.1:59271 answers /health with 500
+    healthcheck_test.go:71: input: backend at http://127.0.0.1:61762 answers /health with 500
     healthcheck_test.go:83: output: first check reported healthy=false
 --- PASS: TestCheckerDetectsUnhealthyStatus (0.00s)
 === RUN   TestCheckerDetectsTimeout
-    healthcheck_test.go:98: input: backend at http://127.0.0.1:59273 sleeps 500ms before answering; checker timeout is 50ms
+    healthcheck_test.go:98: input: backend at http://127.0.0.1:61764 sleeps 500ms before answering; checker timeout is 50ms
     healthcheck_test.go:110: output: first check reported healthy=false
 --- PASS: TestCheckerDetectsTimeout (0.50s)
 === RUN   TestCheckerDetectsRecovery
@@ -219,50 +221,54 @@ ok  	github.com/jerryschen31/system-design-load-balancer/internal/balancer	1.845
     healthcheck_test.go:256: output: first check reported healthy=true
 --- PASS: TestNewCheckerNormalizesPathWithoutLeadingSlash (0.00s)
 PASS
-ok  	github.com/jerryschen31/system-design-load-balancer/internal/healthcheck	2.867s
+ok  	github.com/jerryschen31/system-design-load-balancer/internal/healthcheck	2.865s
 === RUN   TestMaxConcurrentAllowsExactlyNInFlight
-    concurrency_test.go:46: input: MaxConcurrent(3, 0, 0) wrapping a handler that blocks until released
-    concurrency_test.go:66: step: 3 requests confirmed in flight (holding every semaphore slot)
-    concurrency_test.go:85: step: 2 additional requests while at capacity -> statuses [503 503]
-    concurrency_test.go:94: output: the 3 originally-admitted requests all completed with statuses [200 200 200]
+    concurrency_test.go:48: input: MaxConcurrent(3, 0, 0) wrapping a handler that blocks until released
+    concurrency_test.go:68: step: 3 requests confirmed in flight (holding every semaphore slot)
+    concurrency_test.go:87: step: 2 additional requests while at capacity -> statuses [503 503]
+    concurrency_test.go:96: output: the 3 originally-admitted requests all completed with statuses [200 200 200]
 --- PASS: TestMaxConcurrentAllowsExactlyNInFlight (0.00s)
 === RUN   TestLimiterAcquireIsFIFO
-    concurrency_test.go:114: input: 1 slot (held), 3 waiters joining the queue strictly in order 0, 1, 2
-    concurrency_test.go:128: step: all 3 waiters confirmed enqueued (queue length reached 3)
-    concurrency_test.go:147: output: admission order was [0 1 2], want [0 1 2]
+    concurrency_test.go:116: input: 1 slot (held), 3 waiters joining the queue strictly in order 0, 1, 2
+    concurrency_test.go:130: step: all 3 waiters confirmed enqueued (queue length reached 3)
+    concurrency_test.go:149: output: admission order was [0 1 2], want [0 1 2]
 --- PASS: TestLimiterAcquireIsFIFO (0.00s)
 === RUN   TestLimiterGiveUpOnClientCancelFreesQueueSlot
-    concurrency_test.go:166: input: 1 slot (held), queue capacity 1
-    concurrency_test.go:174: step: waiter confirmed enqueued
-    concurrency_test.go:178: output: cancelled waiter's acquire returned 3, want acquireClientGaveUp
+    concurrency_test.go:168: input: 1 slot (held), queue capacity 1
+    concurrency_test.go:176: step: waiter confirmed enqueued
+    concurrency_test.go:180: output: cancelled waiter's acquire returned 3, want acquireClientGaveUp
 --- PASS: TestLimiterGiveUpOnClientCancelFreesQueueSlot (0.00s)
+=== RUN   TestLimiterReleaseGiveUpRaceDoesNotLeakSlots
+    concurrency_test.go:203: input: 5000 iterations of release() raced against a waiter cancelling at the same instant
+    concurrency_test.go:234: output: 5000 iterations resolved cleanly, final acquire still succeeded -- no leaked slot
+--- PASS: TestLimiterReleaseGiveUpRaceDoesNotLeakSlots (5.94s)
 === RUN   TestMaxConcurrentQueueAdmitsAfterWait
-    concurrency_test.go:205: input: 1 slot (held), queue capacity 1, queueWaitTimeout 2s; a second request arrives while the first is in flight
-    concurrency_test.go:219: step: holder confirmed in flight, holding the only slot
-    concurrency_test.go:244: output: holder status=200, queued (waited then admitted) status=200
+    concurrency_test.go:255: input: 1 slot (held), queue capacity 1, queueWaitTimeout 2s; a second request arrives while the first is in flight
+    concurrency_test.go:269: step: holder confirmed in flight, holding the only slot
+    concurrency_test.go:294: output: holder status=200, queued (waited then admitted) status=200
 --- PASS: TestMaxConcurrentQueueAdmitsAfterWait (0.05s)
 === RUN   TestMaxConcurrentQueueTimesOut
-    concurrency_test.go:272: input: 1 slot held indefinitely, queueWaitTimeout=100ms, a second request that will never be released in time
-    concurrency_test.go:276: step: holder confirmed in flight, holding the only slot
-    concurrency_test.go:288: output: status=503 body="timed out waiting for a free slot\n" elapsed=102.605083ms
+    concurrency_test.go:322: input: 1 slot held indefinitely, queueWaitTimeout=100ms, a second request that will never be released in time
+    concurrency_test.go:326: step: holder confirmed in flight, holding the only slot
+    concurrency_test.go:345: output: status=503 body="timed out waiting for a free slot\n" elapsed=102.359375ms
 --- PASS: TestMaxConcurrentQueueTimesOut (0.10s)
 === RUN   TestMaxConcurrentQueueFullRejectsImmediately
-    concurrency_test.go:322: input: 1 slot held, queue capacity 1 also held, a 3rd (overflow) request arrives
-    concurrency_test.go:331: step: 1st request confirmed holding the only slot
-    concurrency_test.go:345: step: 2nd request given time to join the only queue slot
-    concurrency_test.go:357: output: overflow request -> status=503 body="too many concurrent requests\n" elapsed=1.131458ms
+    concurrency_test.go:379: input: 1 slot held, queue capacity 1 also held, a 3rd (overflow) request arrives
+    concurrency_test.go:388: step: 1st request confirmed holding the only slot
+    concurrency_test.go:402: step: 2nd request given time to join the only queue slot
+    concurrency_test.go:416: output: overflow request -> status=503 body="too many concurrent requests\n" elapsed=870.917µs
 --- PASS: TestMaxConcurrentQueueFullRejectsImmediately (0.05s)
 === RUN   TestMaxConcurrentPanicsOnNonPositiveN
-    concurrency_test.go:371: input: MaxConcurrent(0, 0, 0)
-    concurrency_test.go:377: output: panicked as expected: middleware: MaxConcurrent requires a positive n
+    concurrency_test.go:430: input: MaxConcurrent(0, 0, 0)
+    concurrency_test.go:436: output: panicked as expected: middleware: MaxConcurrent requires a positive n
 --- PASS: TestMaxConcurrentPanicsOnNonPositiveN (0.00s)
 === RUN   TestMaxConcurrentPanicsOnNegativeQueueCapacity
-    concurrency_test.go:383: input: MaxConcurrent(1, -1, 0)
-    concurrency_test.go:389: output: panicked as expected: middleware: MaxConcurrent requires a non-negative queueCapacity
+    concurrency_test.go:442: input: MaxConcurrent(1, -1, 0)
+    concurrency_test.go:448: output: panicked as expected: middleware: MaxConcurrent requires a non-negative queueCapacity
 --- PASS: TestMaxConcurrentPanicsOnNegativeQueueCapacity (0.00s)
 === RUN   TestMaxConcurrentPanicsOnQueueWithoutWaitTimeout
-    concurrency_test.go:395: input: MaxConcurrent(1, 5, 0) -- a real queue capacity but no positive wait timeout
-    concurrency_test.go:401: output: panicked as expected: middleware: MaxConcurrent requires a positive queueWaitTimeout when queueCapacity > 0
+    concurrency_test.go:454: input: MaxConcurrent(1, 5, 0) -- a real queue capacity but no positive wait timeout
+    concurrency_test.go:460: output: panicked as expected: middleware: MaxConcurrent requires a positive queueWaitTimeout when queueCapacity > 0
 --- PASS: TestMaxConcurrentPanicsOnQueueWithoutWaitTimeout (0.00s)
 === RUN   TestLoggingAllowsNilLogger
     logging_test.go:10: input: middleware.Logging(nil) wrapping a handler that returns 204
@@ -270,14 +276,14 @@ ok  	github.com/jerryschen31/system-design-load-balancer/internal/healthcheck	2.
     logging_test.go:24: output: request completed with status 204 and no panic
 --- PASS: TestLoggingAllowsNilLogger (0.00s)
 PASS
-ok  	github.com/jerryschen31/system-design-load-balancer/internal/middleware	2.397s
+ok  	github.com/jerryschen31/system-design-load-balancer/internal/middleware	8.337s
 === RUN   TestForwardsRequestToBackend
-    proxy_test.go:62: input: client sends POST /widgets to load balancer http://127.0.0.1:59294; backend is http://127.0.0.1:59293
+    proxy_test.go:62: input: client sends POST /widgets to load balancer http://127.0.0.1:61800; backend is http://127.0.0.1:61799
     proxy_test.go:52: backend step: received POST /widgets
     proxy_test.go:83: output: client got status 418 and body "hello from backend"
 --- PASS: TestForwardsRequestToBackend (0.00s)
 === RUN   TestClientCannotSpoofForwardedFor
-    proxy_test.go:100: input: client sends X-Forwarded-For="6.6.6.6" to http://127.0.0.1:59298
+    proxy_test.go:100: input: client sends X-Forwarded-For="6.6.6.6" to http://127.0.0.1:61804
     proxy_test.go:89: backend step: saw X-Forwarded-For="127.0.0.1"
     proxy_test.go:114: output: backend received rewritten X-Forwarded-For="127.0.0.1"
 --- PASS: TestClientCannotSpoofForwardedFor (0.00s)
@@ -287,7 +293,7 @@ ok  	github.com/jerryschen31/system-design-load-balancer/internal/middleware	2.3
     proxy_test.go:149: output: backend saw Connection="" Keep-Alive present=false
 --- PASS: TestHopByHopHeaderNotForwarded (0.00s)
 === RUN   TestBackendDownReturns502
-    proxy_test.go:157: input: backend http://127.0.0.1:1 is down; client sends GET / through load balancer http://127.0.0.1:59305
+    proxy_test.go:157: input: backend http://127.0.0.1:1 is down; client sends GET / through load balancer http://127.0.0.1:61813
     proxy_test.go:168: output: client got status 502
 --- PASS: TestBackendDownReturns502 (0.00s)
 === RUN   TestNewAllowsNilLogger
@@ -304,29 +310,29 @@ ok  	github.com/jerryschen31/system-design-load-balancer/internal/middleware	2.3
 --- PASS: TestNewPanicsOnNilBalancer (0.00s)
 === RUN   TestBackendTimeoutReturns502
     proxy_test.go:260: input: backend sleeps 500ms, proxy backendTimeout is 50ms, client has no timeout of its own
-    proxy_test.go:271: output: status=502 body="backend request timed out\n" elapsed=52.015041ms
+    proxy_test.go:271: output: status=502 body="backend request timed out\n" elapsed=51.192083ms
 --- PASS: TestBackendTimeoutReturns502 (0.50s)
 === RUN   TestBackendTimeoutAllowsSlowStreamedBodyWithinBudget
     proxy_test.go:311: input: backend streams 5 chunks, 20ms apart, total ~100ms; backendTimeout is 2s (well above that)
     proxy_test.go:324: output: status=200 body="chunk-0 chunk-1 chunk-2 chunk-3 chunk-4 "
 --- PASS: TestBackendTimeoutAllowsSlowStreamedBodyWithinBudget (0.11s)
 === RUN   TestRewriteLogsRoutingDecision
-    proxy_test.go:343: input: GET / through the load balancer, backend is http://127.0.0.1:59325
-    proxy_test.go:352: output: logged "routed GET / -> http://127.0.0.1:59325\n"
+    proxy_test.go:343: input: GET / through the load balancer, backend is http://127.0.0.1:61833
+    proxy_test.go:352: output: logged "routed GET / -> http://127.0.0.1:61833\n"
 --- PASS: TestRewriteLogsRoutingDecision (0.00s)
 === RUN   TestStress_DisabledTimeoutWaitsIndefinitely
     stress_test.go:21: input: backendTimeout=0 (disabled); backend sleeps for 300ms; client timeout is 50ms
     stress_test.go:24: backend step: request reached backend; backend is now sleeping
-    stress_test.go:44: output: client returned after 51.378792ms with error Get "http://127.0.0.1:59330/": context deadline exceeded (Client.Timeout exceeded while awaiting headers) -- opt-out confirmed working
+    stress_test.go:44: output: client returned after 50.893541ms with error Get "http://127.0.0.1:61838/": context deadline exceeded (Client.Timeout exceeded while awaiting headers) -- opt-out confirmed working
 --- PASS: TestStress_DisabledTimeoutWaitsIndefinitely (0.30s)
 === RUN   TestStress_ConcurrentRequestsHandledConcurrently
     stress_test.go:53: input: 50 concurrent requests; backend delay per request is 100ms
-    stress_test.go:96: output: burst finished in 116.985583ms (serial time would have been 5s)
---- PASS: TestStress_ConcurrentRequestsHandledConcurrently (0.12s)
+    stress_test.go:96: output: burst finished in 111.971042ms (serial time would have been 5s)
+--- PASS: TestStress_ConcurrentRequestsHandledConcurrently (0.11s)
 === RUN   TestStress_BurstAgainstUnreachableBackend
     stress_test.go:105: input: 50 concurrent requests against a load balancer whose only backend is down
     stress_test.go:133: output: every observed response was 502
 --- PASS: TestStress_BurstAgainstUnreachableBackend (0.01s)
 PASS
-ok  	github.com/jerryschen31/system-design-load-balancer/internal/proxy	3.494s
+ok  	github.com/jerryschen31/system-design-load-balancer/internal/proxy	3.475s
 ```

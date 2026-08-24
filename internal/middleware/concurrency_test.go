@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -24,6 +25,7 @@ func waitForQueueLen(t *testing.T, l *limiter, want int) {
 		if l.queueLen() == want {
 			return
 		}
+		time.Sleep(time.Millisecond)
 	}
 	t.Fatalf("queue length never reached %d (last observed %d)", want, l.queueLen())
 }
@@ -184,6 +186,54 @@ func TestLimiterGiveUpOnClientCancelFreesQueueSlot(t *testing.T) {
 	}
 }
 
+// TestLimiterReleaseGiveUpRaceDoesNotLeakSlots is a regression test for a
+// review finding: release() and giveUp() both decide "who gets this slot"
+// under the same lock, but only if closing the waiter's signal channel
+// happens *before* release() unlocks. The two goroutines below race
+// release() (freeing a slot a waiter is next in line for) against cancel()
+// (that same waiter giving up) with no ordering imposed between them, many
+// times in a row, to give real goroutine scheduling a good chance of
+// actually interleaving them across whatever the current critical section
+// boundary is. If a slot is ever silently lost, the limiter never regains
+// capacity for it -- the final acquire() below would then time out instead
+// of succeeding, since cur would have crept permanently above size.
+func TestLimiterReleaseGiveUpRaceDoesNotLeakSlots(t *testing.T) {
+	const iterations = 5000
+	l := newLimiter(1, 1)
+	t.Logf("input: %d iterations of release() raced against a waiter cancelling at the same instant", iterations)
+
+	for i := 0; i < iterations; i++ {
+		if res := l.acquire(context.Background(), time.Second); res != acquireGranted {
+			t.Fatalf("iteration %d: initial acquire failed: got %v", i, res)
+		}
+
+		ctx, cancel := context.WithCancel(context.Background())
+		resCh := make(chan acquireResult, 1)
+		go func() {
+			resCh <- l.acquire(ctx, 5*time.Second) // long timeout: only cancel() should end this
+		}()
+		waitForQueueLen(t, l, 1)
+
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() { defer wg.Done(); l.release() }()
+		go func() { defer wg.Done(); cancel() }()
+		wg.Wait()
+
+		if res := <-resCh; res == acquireGranted {
+			l.release() // this iteration's waiter won the race; it must free its own slot
+		}
+		if got := l.queueLen(); got != 0 {
+			t.Fatalf("iteration %d: queue length is %d after resolving, want 0", i, got)
+		}
+	}
+
+	if res := l.acquire(context.Background(), time.Second); res != acquireGranted {
+		t.Fatalf("final acquire failed after %d iterations: got %v -- a slot leaked somewhere", iterations, res)
+	}
+	t.Logf("output: %d iterations resolved cleanly, final acquire still succeeded -- no leaked slot", iterations)
+}
+
 // TestMaxConcurrentQueueAdmitsAfterWait is the HTTP-level proof of the
 // success path: a request arriving while all slots are held, but with a
 // slot freeing up before queueWaitTimeout elapses, is admitted (200)
@@ -282,16 +332,23 @@ func TestMaxConcurrentQueueTimesOut(t *testing.T) {
 		t.Fatalf("queued request failed: %v", err)
 	}
 	defer resp.Body.Close()
-	body := make([]byte, 128)
-	n2, _ := resp.Body.Read(body)
+	// io.ReadAll loops on Read until it hits EOF, rather than trusting a
+	// single Read call to return the whole body -- Read is explicitly
+	// allowed by its contract to return fewer bytes than are available
+	// without that being an error, so a single call risks reading only a
+	// prefix and flaking on a false mismatch.
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("reading response body failed: %v", err)
+	}
 
-	t.Logf("output: status=%d body=%q elapsed=%s", resp.StatusCode, string(body[:n2]), elapsed)
+	t.Logf("output: status=%d body=%q elapsed=%s", resp.StatusCode, string(body), elapsed)
 	if resp.StatusCode != http.StatusServiceUnavailable {
 		t.Errorf("got status %d, want %d", resp.StatusCode, http.StatusServiceUnavailable)
 	}
 	const wantBody = "timed out waiting for a free slot\n"
-	if string(body[:n2]) != wantBody {
-		t.Errorf("got body %q, want %q", string(body[:n2]), wantBody)
+	if string(body) != wantBody {
+		t.Errorf("got body %q, want %q", string(body), wantBody)
 	}
 	if elapsed < queueWaitTimeout {
 		t.Errorf("request returned after %s, want at least queueWaitTimeout (%s)", elapsed, queueWaitTimeout)
@@ -351,16 +408,18 @@ func TestMaxConcurrentQueueFullRejectsImmediately(t *testing.T) {
 		t.Fatalf("overflow request failed: %v", err)
 	}
 	defer resp.Body.Close()
-	body := make([]byte, 128)
-	n2, _ := resp.Body.Read(body)
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("reading response body failed: %v", err)
+	}
 
-	t.Logf("output: overflow request -> status=%d body=%q elapsed=%s", resp.StatusCode, string(body[:n2]), elapsed)
+	t.Logf("output: overflow request -> status=%d body=%q elapsed=%s", resp.StatusCode, string(body), elapsed)
 	if resp.StatusCode != http.StatusServiceUnavailable {
 		t.Errorf("got status %d, want %d", resp.StatusCode, http.StatusServiceUnavailable)
 	}
 	const wantBody = "too many concurrent requests\n"
-	if string(body[:n2]) != wantBody {
-		t.Errorf("got body %q, want %q", string(body[:n2]), wantBody)
+	if string(body) != wantBody {
+		t.Errorf("got body %q, want %q", string(body), wantBody)
 	}
 	if elapsed >= queueWaitTimeout {
 		t.Errorf("overflow request took %s (>= queueWaitTimeout %s); it should have been rejected immediately, never waiting", elapsed, queueWaitTimeout)

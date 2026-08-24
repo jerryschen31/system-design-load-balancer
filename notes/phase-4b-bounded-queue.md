@@ -86,3 +86,33 @@ The manual walkthrough (real `echobackend` and `loadbalancer` processes on local
 - **`queueWaitTimeout` is a single fixed value for every request**, regardless of what kind of request it is or how long it's realistically likely to need to wait. A more adaptive design (e.g., a shorter timeout for read-only requests that can be retried elsewhere, a longer one for something that must eventually succeed) is a plausible refinement, not addressed here.
 - **Still no automatic retry against a different backend, no rate limiting, no passive health checking / circuit breaker** — all carried over from phase 4a, unchanged.
 - **Still no live backend membership changes, no TLS** — carried over from phases 1-3, unchanged.
+
+## 7. PR review follow-up
+
+GitHub Copilot's automated review of PR #5 caught a real bug in the fair hand-off described in section 2 above — a genuine gap between "the algorithm's design is correct" and "the code actually implements that design correctly."
+
+**The general problem, in plain terms first:** `release()` (handing a freed slot to the next person in line) does two separate things — take that person off the waiting list, and tell them "you're up." The original code did those two things with a gap in between: it unlocked *before* sending the "you're up" signal, not after.
+
+```
+ release()                          a waiter timing out, at the same moment
+ ─────────                          ───────────────────────────────────────
+ lock
+ take waiter off the list
+ unlock
+                    <-- gap -->     lock
+                                    "was I told yet?" -- checks, and the
+                                    signal hasn't been sent yet -- concludes
+                                    "no", removes itself, walks away
+ send "you're up" signal
+ (now nobody is listening)
+```
+
+If a waiter happens to be deciding "I've waited too long, I'm leaving" during exactly that gap, it checks whether it was granted the slot, sees "not yet," and walks away — but `release()` had already committed that slot to this exact waiter and won't offer it to anyone else. The slot vanishes: not held by anyone, not returned to the pool, gone until the process restarts.
+
+**The fix:** don't unlock until *both* steps — taking the waiter off the list, and sending the "you're up" signal — are done. That closes the gap entirely; there's no longer a moment where the first has happened but the second hasn't.
+
+**How this was verified, not just asserted:** a new test, `TestLimiterReleaseGiveUpRaceDoesNotLeakSlots` (`internal/middleware/concurrency_test.go`), runs 5000 iterations racing `release()` against a waiter giving up at the same instant, with no ordering imposed between the two — then confirms the limiter can still grant a fresh request afterward (if even one slot had leaked, it couldn't). Before trusting this test, it was deliberately run against the *original, buggy* code first: it failed at iteration 4540 with exactly the predicted symptom (the limiter could no longer grant new acquires) — empirical proof the test actually catches the bug it claims to, not just a test that happens to pass. After applying the fix, the same test (and 10 repeats under `-race`) passed cleanly.
+
+Two smaller review findings were also addressed: a test helper (`waitForQueueLen`) was busy-polling in a tight loop with no yield, which could burn CPU unnecessarily on a slow run — a brief sleep was added between checks. Two tests were reading an HTTP response body with a single `Read()` call, which is allowed by Go's `io.Reader` contract to return fewer bytes than are available without that being an error or an EOF — both switched to `io.ReadAll`, which loops until the body is fully drained.
+
+**A question worth answering explicitly, since it came up during review: why didn't `go test -race` already catch the slot-leak bug?** The race detector finds *data races* — unsynchronized concurrent access to the same memory. Every read and write of the limiter's shared state in the buggy version was already properly protected by the mutex; nothing was ever touched without holding the lock first. What was wrong was a *logic* bug about the order of two correctly-synchronized operations relative to each other — the lock was never the problem, the sequencing was. `-race` has no way to know that "close the channel" was supposed to happen before "unlock," only that neither operation, on its own, was accessed unsafely. This is a useful distinction to keep in mind generally: passing `-race` proves the absence of one specific class of bug (data races), not the absence of all concurrency bugs (this kind of lost-update/leaked-resource race, deadlocks, or livelocks can all pass `-race` cleanly while still being real).

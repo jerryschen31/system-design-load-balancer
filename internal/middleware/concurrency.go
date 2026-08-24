@@ -30,12 +30,20 @@ type waiter struct {
 	ready chan struct{}
 }
 
-// limiter is a bounded, FIFO-fair counting semaphore with an optional
-// bounded wait queue layered on top. size is the hard concurrency ceiling
-// (like phase 4a's plain semaphore); queueCap bounds how many additional
-// requests may wait for a slot to free up, so an overloaded backend can
-// never cause unbounded goroutines/connections to pile up here either --
-// the same reasoning that motivated size in the first place, one layer up.
+// limiter caps how many requests may hold a slot at once, plus an
+// optional bounded wait queue for requests that show up once every slot
+// is taken. This is a semaphore: a shared counter that tracks how many
+// slots are currently in use, where "acquire" only succeeds if a slot is
+// free (and otherwise blocks or fails, depending on the caller), and
+// "release" gives a slot back for someone else to use. It's the standard
+// tool for "at most N of these may happen at once" -- size is that N
+// (the hard concurrency ceiling, like phase 4a's plain semaphore before
+// the queue existed); queueCap bounds how many additional requests may
+// wait for a slot to free up, so an overloaded backend can never cause
+// unbounded goroutines/connections to pile up here either -- the same
+// reasoning that motivated size in the first place, one layer up. "FIFO"
+// means the queue is strictly first-come-first-served: see release()
+// below for how that's enforced.
 type limiter struct {
 	mu       sync.Mutex
 	cur      int
@@ -109,12 +117,25 @@ func (l *limiter) giveUp(elem *list.Element, w *waiter, reason acquireResult) ac
 // to the longest-waiting one (FIFO) without ever being "let go" for a new
 // arrival to grab first -- that direct handoff is what makes this fair
 // instead of best-effort.
+//
+// close(w.ready) happens while l.mu is still held, deliberately -- not
+// after unlocking. giveUp() below re-checks w.ready under this same lock
+// to decide whether a waiter that's timing out was already granted the
+// slot. If the close happened after unlocking, there would be a window
+// where release() has committed this slot to w (removed it from the
+// list, so no one else will ever be offered it) but hasn't signaled w
+// yet -- a giveUp() call landing in exactly that window would see "not
+// signaled" and walk away, permanently leaking the slot, since release()
+// already considers it spoken for. Keeping both steps (remove from the
+// list, signal the waiter) inside one critical section closes that
+// window: by the time giveUp() is even allowed to check, the answer is
+// already final.
 func (l *limiter) release() {
 	l.mu.Lock()
 	if front := l.waiters.Front(); front != nil {
 		w := l.waiters.Remove(front).(*waiter)
-		l.mu.Unlock()
 		close(w.ready)
+		l.mu.Unlock()
 		return
 	}
 	l.cur--
