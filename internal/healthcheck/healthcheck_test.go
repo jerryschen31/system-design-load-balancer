@@ -192,3 +192,69 @@ func TestCheckerStopsAfterContextCancel(t *testing.T) {
 		t.Fatalf("got %d checks after cancel, want at most 1 (checker should stop polling once its context is cancelled)", countAfterWait-countAtCancel)
 	}
 }
+
+// TestNewCheckerPanicsOnNonPositiveInterval confirms the failure happens at
+// construction, not later inside time.NewTicker on some backend's polling
+// goroutine (a non-positive duration passed to time.NewTicker panics) --
+// same "fail loud and immediate, not lazily on a hard-to-trace goroutine"
+// posture as the existing empty-backends and nil-callback checks.
+func TestNewCheckerPanicsOnNonPositiveInterval(t *testing.T) {
+	backend := mustURL(t, "http://127.0.0.1:1")
+	t.Log("input: NewChecker with interval=0")
+
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("expected NewChecker to panic on a non-positive interval")
+		}
+		t.Logf("output: NewChecker panicked as expected: %v", r)
+	}()
+
+	NewChecker([]*url.URL{backend}, 0, time.Second, "/health", func(*url.URL, bool) {}, nil)
+}
+
+func TestNewCheckerPanicsOnNonPositiveTimeout(t *testing.T) {
+	backend := mustURL(t, "http://127.0.0.1:1")
+	t.Log("input: NewChecker with timeout=-1s")
+
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("expected NewChecker to panic on a non-positive timeout")
+		}
+		t.Logf("output: NewChecker panicked as expected: %v", r)
+	}()
+
+	NewChecker([]*url.URL{backend}, time.Second, -1*time.Second, "/health", func(*url.URL, bool) {}, nil)
+}
+
+// TestNewCheckerNormalizesPathWithoutLeadingSlash proves the normalization
+// isn't just cosmetic: a checker constructed with a path missing its
+// leading slash must still successfully probe the real endpoint, not build
+// a malformed URL that silently never matches.
+func TestNewCheckerNormalizesPathWithoutLeadingSlash(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/health" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer backend.Close()
+	t.Logf("input: NewChecker path=%q (no leading slash) against a backend serving /health", "health")
+
+	results := make(chan result, 8)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	backendURL := mustURL(t, backend.URL)
+	c := NewChecker([]*url.URL{backendURL}, time.Second, time.Second, "health",
+		func(b *url.URL, h bool) { results <- result{b, h} }, nil)
+	c.Start(ctx)
+
+	got := waitForResult(t, results, 2*time.Second)
+	t.Logf("output: first check reported healthy=%v", got.healthy)
+	if !got.healthy {
+		t.Fatal("got healthy=false, want true -- path should have been normalized to \"/health\"")
+	}
+}

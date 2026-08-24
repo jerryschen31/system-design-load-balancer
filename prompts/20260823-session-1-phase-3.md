@@ -1,14 +1,4 @@
-╭─── Claude Code v2.1.221 ─────────────────────────────────────────────────────╮
-│                                                    │ Tips for getting        │
-│                 Welcome back Jerry!                │ started                 │
-│                                                    │ Run /init to create a … │
-│                      ▗ ▗   ▖ ▖                     │ ─────────────────────── │
-│                                                    │ What's new              │
-│                        ▘▘ ▝▝                       │ Cost estimates (`/cost… │
-│   Sonnet 5 · Claude Pro · [redacted]'s   │ Added the one-time ful… │
-│   Organization                                     │ Added `/claude-api upg… │
-│       ~/gh/public/system-design-load-balancer      │ /release-notes for more │
-╰──────────────────────────────────────────────────────────────────────────────╯
+[Claude Code v2.1.221 session banner omitted -- terminal UI chrome only, no session content]
 
 
 ❯ /clear                                                                        

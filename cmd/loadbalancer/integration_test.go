@@ -106,7 +106,7 @@ func TestIntegration_ChecksRouteAroundUnhealthyBackend(t *testing.T) {
 	const interval = 20 * time.Millisecond
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	checker := healthcheck.NewChecker(backends, interval, time.Second, "/health", rr.SetHealthy, testLogger())
+	checker := healthcheck.NewChecker(backends, interval, time.Second, "/health", func(b *url.URL, h bool) { rr.SetHealthy(b, h) }, testLogger())
 	checker.Start(ctx)
 
 	lb := httptest.NewServer(proxy.New(rr, testLogger()))
@@ -222,7 +222,7 @@ func TestStress_ConcurrentTrafficSurvivesHealthFlapping(t *testing.T) {
 	const interval = 15 * time.Millisecond
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	checker := healthcheck.NewChecker(backends, interval, time.Second, "/health", rr.SetHealthy, testLogger())
+	checker := healthcheck.NewChecker(backends, interval, time.Second, "/health", func(b *url.URL, h bool) { rr.SetHealthy(b, h) }, testLogger())
 	checker.Start(ctx)
 
 	lb := httptest.NewServer(proxy.New(rr, testLogger()))

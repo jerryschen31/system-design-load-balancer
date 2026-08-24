@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 )
 
@@ -40,6 +41,28 @@ func NewChecker(backends []*url.URL, interval, timeout time.Duration, path strin
 	}
 	if onResult == nil {
 		panic("healthcheck: NewChecker requires a non-nil onResult callback")
+	}
+	// interval and timeout have no sensible default -- unlike path below,
+	// there's no single "obviously right" fallback for "how often" or
+	// "how long," so an invalid value here is a caller bug to panic on,
+	// not something to silently paper over. A non-positive interval would
+	// otherwise panic later anyway, inside time.NewTicker on whichever
+	// backend's goroutine happens to start first (Start launches one
+	// goroutine per backend), which is a much harder failure to trace
+	// back to NewChecker having been called wrong in the first place.
+	if interval <= 0 {
+		panic("healthcheck: NewChecker requires a positive interval")
+	}
+	if timeout <= 0 {
+		panic("healthcheck: NewChecker requires a positive timeout")
+	}
+	// path, unlike interval/timeout, does have an obvious correct
+	// fallback (the root path), so a missing leading slash is normalized
+	// rather than treated as a fatal caller error.
+	if path == "" {
+		path = "/"
+	} else if !strings.HasPrefix(path, "/") {
+		path = "/" + path
 	}
 	if logger == nil {
 		logger = log.New(io.Discard, "", 0)

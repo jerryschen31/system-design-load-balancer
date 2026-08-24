@@ -1,11 +1,13 @@
 package proxy
 
 import (
+	"bytes"
 	"io"
 	"log"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 
 	"github.com/jerryschen31/system-design-load-balancer/internal/balancer"
@@ -195,9 +197,22 @@ func TestNoHealthyBackendsReturns502(t *testing.T) {
 	}
 	defer resp.Body.Close()
 
-	t.Logf("output: client got status %d", resp.StatusCode)
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read response body: %v", err)
+	}
+
+	t.Logf("output: client got status %d, body %q", resp.StatusCode, string(body))
 	if resp.StatusCode != http.StatusBadGateway {
 		t.Fatalf("got status %d, want %d", resp.StatusCode, http.StatusBadGateway)
+	}
+	// Distinct from a generic backend-down 502: the balancer itself
+	// refused to pick a target, so the client should get a specific,
+	// honest message rather than an empty body indistinguishable from
+	// any other failure.
+	const wantBody = "no healthy backends available\n"
+	if string(body) != wantBody {
+		t.Fatalf("got body %q, want %q", string(body), wantBody)
 	}
 }
 
@@ -213,4 +228,32 @@ func TestNewPanicsOnNilBalancer(t *testing.T) {
 	}()
 
 	New(nil, nil)
+}
+
+// TestRewriteLogsRoutingDecision confirms the fix for the review comment
+// asking which backend a request was routed to be logged: a real logger
+// (not io.Discard) must see a line naming the selected backend.
+func TestRewriteLogsRoutingDecision(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	var buf bytes.Buffer
+	logger := log.New(&buf, "", 0)
+	lb := httptest.NewServer(New(singleBackend(t, backend.URL), logger))
+	defer lb.Close()
+	t.Logf("input: GET / through the load balancer, backend is %s", backend.URL)
+
+	resp, err := http.Get(lb.URL + "/")
+	if err != nil {
+		t.Fatalf("request through proxy failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	got := buf.String()
+	t.Logf("output: logged %q", got)
+	if !strings.Contains(got, "GET") || !strings.Contains(got, backend.URL) {
+		t.Fatalf("log output %q does not mention the routing decision (method + selected backend)", got)
+	}
 }

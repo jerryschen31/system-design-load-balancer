@@ -17,7 +17,12 @@ type Balancer interface {
 	// SetHealthy records the current health of a single backend, as
 	// determined by something outside the balancer (a health checker).
 	// backend must be one of the URLs the balancer was constructed with.
-	SetHealthy(backend *url.URL, healthy bool)
+	// changed reports whether this call actually altered routing state
+	// (a recognized backend whose health value differs from what was
+	// previously recorded) -- callers that want to log state transitions,
+	// rather than every individual health-check result, use this instead
+	// of re-deriving "did this change" themselves.
+	SetHealthy(backend *url.URL, healthy bool) (changed bool)
 }
 
 // RoundRobin cycles through the backends currently marked healthy, in the
@@ -128,7 +133,7 @@ func (r *RoundRobin) Next() *url.URL {
 // URLs originally passed to NewRoundRobin; unrecognized backends are
 // ignored, since only the health checker (which was itself constructed
 // from this balancer's backend list) is expected to call this.
-func (r *RoundRobin) SetHealthy(backend *url.URL, healthy bool) {
+func (r *RoundRobin) SetHealthy(backend *url.URL, healthy bool) (changed bool) {
 	key := backend.String()
 
 	r.mu.Lock()
@@ -137,14 +142,14 @@ func (r *RoundRobin) SetHealthy(backend *url.URL, healthy bool) {
 	current, ok := r.status[key]
 	if !ok {
 		// Not one of this balancer's backends -- nothing to update.
-		return
+		return false
 	}
 	if current == healthy {
 		// No actual change -- skip the rebuild-and-swap. This also
 		// means a health checker reporting "still healthy" every
 		// cycle (the common case) is nearly free: one map lookup, no
 		// allocation.
-		return
+		return false
 	}
 	r.status[key] = healthy
 
@@ -155,4 +160,5 @@ func (r *RoundRobin) SetHealthy(backend *url.URL, healthy bool) {
 		}
 	}
 	r.healthy.Store(&rebuilt)
+	return true
 }

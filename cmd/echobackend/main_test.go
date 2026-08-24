@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"io"
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 )
@@ -47,6 +49,27 @@ func TestHealthHandlerReflectsState(t *testing.T) {
 	t.Logf("output: healthy=false -> status %d", rec.Code)
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Errorf("got status %d, want %d", rec.Code, http.StatusServiceUnavailable)
+	}
+}
+
+// TestHealthHandlerLogsRequest confirms the fix for the review comment
+// flagging newHealthHandler's logger parameter as unused: a real logger
+// (writing to a buffer instead of io.Discard) must actually see a line for
+// each /health request, matching the other two handlers' behavior.
+func TestHealthHandlerLogsRequest(t *testing.T) {
+	var buf bytes.Buffer
+	logger := log.New(&buf, "", 0)
+	var healthy atomic.Bool
+	healthy.Store(true)
+	handler := newHealthHandler(logger, &healthy)
+	t.Log("input: GET /health against a handler with a real (non-discard) logger")
+
+	handler(httptest.NewRecorder(), httptest.NewRequest("GET", "/health", nil))
+
+	got := buf.String()
+	t.Logf("output: logged %q", got)
+	if !strings.Contains(got, "GET") || !strings.Contains(got, "/health") {
+		t.Fatalf("log output %q does not mention the request method/path", got)
 	}
 }
 

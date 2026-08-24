@@ -42,7 +42,9 @@ func newHandler(logger *log.Logger, addr string) http.HandlerFunc {
 // an edge case to special-case around.
 func newHealthHandler(logger *log.Logger, healthy *atomic.Bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if healthy.Load() {
+		cur := healthy.Load()
+		logger.Printf("%s %s healthy=%v", r.Method, r.URL.Path, cur)
+		if cur {
 			w.WriteHeader(http.StatusOK)
 			fmt.Fprintln(w, "ok")
 			return

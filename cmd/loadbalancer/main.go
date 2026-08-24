@@ -105,14 +105,29 @@ func main() {
 	// defer cancelHealth(): defer schedules a function call to run when the enclosing function (main, here) returns — regardless of how it returns (normal fall-through, or via a later return). It's a safety net: if main exits some other way than reaching line 126 normally, cancelHealth still fires and no goroutine leaks polling forever. Note it's also called explicitly at line 120 during normal shutdown — the defer is the backstop, not the primary mechanism.
 	defer cancelHealth()
 
-	// rr.SetHealthy (a method value — passing rr.SetHealthy as an argument, without calling it, packages up "call this method on this particular rr" as a plain function value) is passed in as the onResult func(backend *url.URL, healthy bool) callback parameter — the health checker doesn't know or care about RoundRobin internals; it just calls this function whenever a probe succeeds or fails, and RoundRobin updates its own state. That's a deliberate decoupling: the checker's only contract with the balancer is "call me back with a URL and a bool."
-	checker := healthcheck.NewChecker(targets, *healthCheckInterval, *healthCheckTimeout, *healthCheckPath, rr.SetHealthy, logger)
+	// onHealthChange wraps rr.SetHealthy rather than passing it to the
+	// checker directly. rr.SetHealthy now returns a bool reporting whether
+	// this particular call actually flipped a backend's routing state (as
+	// opposed to reporting the same health value it already had) --
+	// RoundRobin computes that fact anyway as part of deciding whether to
+	// rebuild its healthy slice, so it's surfaced here instead of the
+	// caller re-deriving it independently. This closure is what decides
+	// that fact is worth a log line: the balancer package itself takes no
+	// logger and does no I/O, keeping it pure and easy to test in
+	// isolation -- observability is wired in at the composition root
+	// (here), not baked into the reusable library packages.
+	onHealthChange := func(backend *url.URL, healthy bool) {
+		if rr.SetHealthy(backend, healthy) {
+			logger.Printf("backend %s health changed: healthy=%v", backend, healthy)
+		}
+	}
+	checker := healthcheck.NewChecker(targets, *healthCheckInterval, *healthCheckTimeout, *healthCheckPath, onHealthChange, logger)
 	checker.Start(healthCtx)
 
-	// go func() { ... }(): launches a goroutine — a lightweight, independently-scheduled function execution managed by the Go runtime 
-	// (not an OS thread directly, though the runtime multiplexes goroutines onto OS threads). go followed by a function call starts 
-	//  that call running concurrently and returns immediately to the next line of main — it does not wait for the function to finish. 
-	// This is necessary here because server.ListenAndServe() blocks — it runs forever, accepting connections, until the server is shut 
+	// go func() { ... }(): launches a goroutine — a lightweight, independently-scheduled function execution managed by the Go runtime
+	// (not an OS thread directly, though the runtime multiplexes goroutines onto OS threads). go followed by a function call starts
+	//  that call running concurrently and returns immediately to the next line of main — it does not wait for the function to finish.
+	// This is necessary here because server.ListenAndServe() blocks — it runs forever, accepting connections, until the server is shut
 	// down or errors. If it ran directly in main() without go, execution would never reach the signal-handling code below.
 	go func() {
 		logger.Printf("load balancer listening on %s, forwarding to %s", *listenAddr, backends.String())
@@ -121,20 +136,20 @@ func main() {
 		}
 	}()
 
-	// chan os.Signal: a channel is Go's built-in typed pipe for passing values between goroutines, with the runtime handling the 
-	// synchronization. make(chan os.Signal, 1) creates one with buffer capacity 1 — meaning one value can be sent into it without 
+	// chan os.Signal: a channel is Go's built-in typed pipe for passing values between goroutines, with the runtime handling the
+	// synchronization. make(chan os.Signal, 1) creates one with buffer capacity 1 — meaning one value can be sent into it without
 	// a receiver ready to take it immediately (an unbuffered channel, capacity 0, would block the sender until someone receives).
 	// In plain language, I think this means stop is waiting for a SINGLE signal.
-	// signal.Notify(stop, os.Interrupt, syscall.SIGTERM) tells the Go runtime "when the OS delivers SIGINT (Ctrl+C) or SIGTERM 
-	// (the default signal kill sends) to this process, deliver it into the stop channel instead of the process's default action 
+	// signal.Notify(stop, os.Interrupt, syscall.SIGTERM) tells the Go runtime "when the OS delivers SIGINT (Ctrl+C) or SIGTERM
+	// (the default signal kill sends) to this process, deliver it into the stop channel instead of the process's default action
 	// (which would just terminate immediately)."
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
 
-	// <-stop: the receive operator. This line blocks — main's goroutine sits here doing nothing — until a value arrives on stop. 
-	// This is the whole synchronization mechanism: the main goroutine is parked here while the go func(){ ... }() above independently 
+	// <-stop: the receive operator. This line blocks — main's goroutine sits here doing nothing — until a value arrives on stop.
+	// This is the whole synchronization mechanism: the main goroutine is parked here while the go func(){ ... }() above independently
 	// serves requests, until an OS signal wakes it up.
-	// Once unblocked (upon SIGINT Ctrl+C or SIGTERM kill signal): cancelHealth() below stops the health-check polling goroutines. 
+	// Once unblocked (upon SIGINT Ctrl+C or SIGTERM kill signal): cancelHealth() below stops the health-check polling goroutines.
 	<-stop
 
 	logger.Println("shutting down...")

@@ -12,9 +12,9 @@ import (
 	"github.com/jerryschen31/system-design-load-balancer/internal/balancer"
 )
 
-// errNoHealthyBackends is returned by noBackendTransport when Rewrite
-// couldn't set a target at all, i.e. balancer.Next() returned nil because
-// every backend is currently marked unhealthy.
+// errNoHealthyBackends is returned by the roundTripperFunc below when
+// Rewrite couldn't set a target at all, i.e. balancer.Next() returned nil
+// because every backend is currently marked unhealthy.
 var errNoHealthyBackends = errors.New("proxy: no healthy backends available")
 
 // roundTripperFunc adapts a plain function to the http.RoundTripper
@@ -67,6 +67,12 @@ func New(b balancer.Balancer, logger *log.Logger) *httputil.ReverseProxy {
 			}
 			pr.SetURL(target)
 			pr.SetXForwarded()
+			// Which backend a given request landed on was previously only
+			// inferable indirectly (cross-referencing this process's logs
+			// with each backend's own). Logging it here -- the one place
+			// the decision is actually made -- records it as a fact at the
+			// moment it happens, rather than reconstructing it after.
+			logger.Printf("routed %s %s -> %s", pr.In.Method, pr.In.URL.Path, target)
 		},
 		Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
 			if r.URL == nil || r.URL.Host == "" {
@@ -79,6 +85,15 @@ func New(b balancer.Balancer, logger *log.Logger) *httputil.ReverseProxy {
 		ErrorLog: logger,
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			logger.Printf("backend error for %s %s: %v", r.Method, r.URL.Path, err)
+			if errors.Is(err, errNoHealthyBackends) {
+				// A specific, honest message for the specific case: the
+				// balancer itself refused to pick a target, as opposed to
+				// picking one and having the request to it fail. http.Error
+				// sets Content-Type, writes the status, and writes the
+				// message plus a trailing newline in one call.
+				http.Error(w, "no healthy backends available", http.StatusBadGateway)
+				return
+			}
 			w.WriteHeader(http.StatusBadGateway)
 		},
 	}

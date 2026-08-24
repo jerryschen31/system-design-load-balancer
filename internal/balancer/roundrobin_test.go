@@ -264,3 +264,35 @@ func TestRoundRobinConcurrentSetHealthyAndNext(t *testing.T) {
 	wg.Wait()
 	t.Log("output: no data race reported (run with -race to make this test meaningful)")
 }
+
+// TestRoundRobinSetHealthyReportsWhetherStateChanged locks in the changed
+// return value's contract: true only when a recognized backend's health
+// value actually differs from what was previously recorded. Callers (like
+// cmd/loadbalancer's onHealthChange wiring) use this to log state
+// transitions without re-deriving "did this change" themselves.
+func TestRoundRobinSetHealthyReportsWhetherStateChanged(t *testing.T) {
+	a := mustURL(t, "http://backend-a")
+	stranger := mustURL(t, "http://not-a-backend")
+	rr := NewRoundRobin([]*url.URL{a})
+	t.Log("input: fresh balancer over [backend-a], which starts healthy")
+
+	if changed := rr.SetHealthy(a, true); changed {
+		t.Error("got changed=true for a no-op (already healthy) call, want false")
+	}
+	t.Log("step: SetHealthy(a, true) on an already-healthy backend -> changed=false")
+
+	if changed := rr.SetHealthy(a, false); !changed {
+		t.Error("got changed=false for an actual flip healthy->unhealthy, want true")
+	}
+	t.Log("step: SetHealthy(a, false) -> changed=true")
+
+	if changed := rr.SetHealthy(a, false); changed {
+		t.Error("got changed=true for a repeated identical call, want false")
+	}
+	t.Log("step: SetHealthy(a, false) again -> changed=false")
+
+	if changed := rr.SetHealthy(stranger, false); changed {
+		t.Error("got changed=true for an unrecognized backend, want false")
+	}
+	t.Log("output: SetHealthy on an unrecognized backend -> changed=false")
+}
