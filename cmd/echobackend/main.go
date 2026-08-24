@@ -10,7 +10,10 @@
 // manually flipping this backend's reported health during a demo --
 // letting you watch the load balancer route around a backend that's still
 // running but failing its health check, distinct from killing the process
-// outright (which phases 1-2 already cover via connection-refused).
+// outright (which phases 1-2 already cover via connection-refused). Plus a
+// /hang endpoint that never responds, for demonstrating that the load
+// balancer currently has nothing bounding how long it will wait on a
+// backend that's healthy but stuck.
 package main
 
 import (
@@ -71,6 +74,24 @@ func newToggleHandler(logger *log.Logger, healthy *atomic.Bool) http.HandlerFunc
 	}
 }
 
+// newHangHandler never writes a response -- it blocks until the request's
+// context is done (the client gives up and closes the connection, or the
+// process exits). It exists purely as a manual test fixture: routing a
+// request here simulates a backend that has accepted the TCP connection but
+// is stuck (deadlocked, waiting on a downstream dependency that never
+// answers, etc.) rather than one that's down. Unlike /health/toggle, this
+// doesn't change any state a health check would ever observe -- /health
+// keeps answering normally on its own goroutine, so a backend serving a
+// hung /hang request still reports healthy, which is the point: it shows
+// the load balancer has nothing today that bounds how long it will wait on
+// a backend that accepted the request but never responds.
+func newHangHandler(logger *log.Logger) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		logger.Printf("%s %s: hanging until the connection is dropped", r.Method, r.URL.Path)
+		<-r.Context().Done()
+	}
+}
+
 func main() {
 	listenAddr := flag.String("listen", ":9001", "address for this backend to listen on")
 	flag.Parse()
@@ -84,6 +105,7 @@ func main() {
 	mux := http.NewServeMux()
 	mux.Handle("/health", newHealthHandler(logger, &healthy))
 	mux.Handle("/health/toggle", newToggleHandler(logger, &healthy))
+	mux.Handle("/hang", newHangHandler(logger))
 	mux.Handle("/", newHandler(logger, *listenAddr))
 
 	if err := http.ListenAndServe(*listenAddr, mux); err != nil {
