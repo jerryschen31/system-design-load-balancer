@@ -4,6 +4,7 @@ import (
 	"net/url"
 	"sync"
 	"testing"
+	"time"
 )
 
 func mustURL(t *testing.T, raw string) *url.URL {
@@ -111,4 +112,187 @@ func TestRoundRobinConcurrentCallsStayBalanced(t *testing.T) {
 		}
 	}
 	t.Logf("output: every backend received exactly %d calls, confirming no update was lost across %d concurrent goroutines", want, goroutines)
+}
+
+// TestNewRoundRobinStartsAllBackendsHealthy confirms the optimistic-start
+// default: every backend is eligible to receive traffic immediately, before
+// any health check has run against it.
+func TestNewRoundRobinStartsAllBackendsHealthy(t *testing.T) {
+	backends := []*url.URL{
+		mustURL(t, "http://backend-a"),
+		mustURL(t, "http://backend-b"),
+	}
+	t.Logf("input: %d fresh backends, no SetHealthy calls yet", len(backends))
+
+	rr := NewRoundRobin(backends)
+	seen := make(map[string]bool)
+	for i := 0; i < 4; i++ {
+		seen[rr.Next().String()] = true
+	}
+	t.Logf("output: backends reached by Next(): %v", seen)
+	for _, b := range backends {
+		if !seen[b.String()] {
+			t.Fatalf("backend %s never received a call -- it should have started healthy", b)
+		}
+	}
+}
+
+// TestRoundRobinSkipsUnhealthyBackend proves SetHealthy actually changes
+// routing: once a backend is marked unhealthy, Next() must stop returning
+// it, and cycle only over the remaining healthy ones.
+func TestRoundRobinSkipsUnhealthyBackend(t *testing.T) {
+	a := mustURL(t, "http://backend-a")
+	b := mustURL(t, "http://backend-b")
+	c := mustURL(t, "http://backend-c")
+	rr := NewRoundRobin([]*url.URL{a, b, c})
+	t.Log("input: 3 healthy backends, then backend-b is marked unhealthy")
+
+	rr.SetHealthy(b, false)
+
+	for i := 0; i < 6; i++ {
+		got := rr.Next()
+		if got.String() == b.String() {
+			t.Fatalf("call %d: got %s, which was marked unhealthy and should have been skipped", i, got)
+		}
+	}
+	t.Log("output: 6 calls to Next() never returned the unhealthy backend")
+
+	rr.SetHealthy(b, true)
+	seen := make(map[string]bool)
+	for i := 0; i < 6; i++ {
+		seen[rr.Next().String()] = true
+	}
+	t.Logf("step: backend-b marked healthy again; backends reached: %v", seen)
+	if !seen[b.String()] {
+		t.Fatal("backend-b was marked healthy again but Next() never returned it")
+	}
+}
+
+// TestRoundRobinAllUnhealthyReturnsNil proves the balancer fails loud
+// (nil, for the proxy to turn into a 502) rather than silently routing to
+// a backend it knows is down.
+func TestRoundRobinAllUnhealthyReturnsNil(t *testing.T) {
+	a := mustURL(t, "http://backend-a")
+	b := mustURL(t, "http://backend-b")
+	rr := NewRoundRobin([]*url.URL{a, b})
+	t.Log("input: 2 backends, both marked unhealthy")
+
+	rr.SetHealthy(a, false)
+	rr.SetHealthy(b, false)
+
+	got := rr.Next()
+	t.Logf("output: Next() returned %v", got)
+	if got != nil {
+		t.Fatalf("got %s, want nil -- no backend is healthy", got)
+	}
+}
+
+// TestRoundRobinSetHealthyIgnoresUnknownBackend confirms SetHealthy is a
+// no-op for a URL that isn't one of this balancer's own backends, rather
+// than silently growing the backend set.
+func TestRoundRobinSetHealthyIgnoresUnknownBackend(t *testing.T) {
+	a := mustURL(t, "http://backend-a")
+	stranger := mustURL(t, "http://not-a-backend")
+	rr := NewRoundRobin([]*url.URL{a})
+	t.Logf("input: balancer over [%s], SetHealthy called for unrelated %s", a, stranger)
+
+	rr.SetHealthy(stranger, false)
+
+	got := rr.Next()
+	t.Logf("output: Next() returned %s", got)
+	if got.String() != a.String() {
+		t.Fatalf("got %s, want %s -- an unrecognized backend must not affect routing", got, a)
+	}
+}
+
+// TestRoundRobinConcurrentSetHealthyAndNext runs SetHealthy from many
+// goroutines (simulating several backends' health-check loops reporting at
+// once) concurrently with many Next() calls (simulating in-flight
+// requests). It doesn't assert a specific distribution -- the health state
+// is changing throughout -- it exists to be run under `go test -race`,
+// which is the actual check: SetHealthy's map + atomic.Pointer swap must
+// be race-free under concurrent writers, and Next() must never observe a
+// half-updated healthy slice.
+func TestRoundRobinConcurrentSetHealthyAndNext(t *testing.T) {
+	backends := []*url.URL{
+		mustURL(t, "http://backend-a"),
+		mustURL(t, "http://backend-b"),
+		mustURL(t, "http://backend-c"),
+	}
+	rr := NewRoundRobin(backends)
+	t.Logf("input: %d backends, concurrent SetHealthy flapping and Next() calls for 100ms", len(backends))
+
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+
+	// One flapping goroutine per backend, toggling its health repeatedly.
+	for _, b := range backends {
+		wg.Add(1)
+		go func(b *url.URL) {
+			defer wg.Done()
+			healthy := true
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+					rr.SetHealthy(b, healthy)
+					healthy = !healthy
+				}
+			}
+		}(b)
+	}
+
+	// Many goroutines hammering Next() concurrently with the flapping above.
+	for g := 0; g < 20; g++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+					rr.Next() // return value intentionally unchecked: nil is valid if all 3 happen to be unhealthy at this instant
+				}
+			}
+		}()
+	}
+
+	time.Sleep(100 * time.Millisecond)
+	close(stop)
+	wg.Wait()
+	t.Log("output: no data race reported (run with -race to make this test meaningful)")
+}
+
+// TestRoundRobinSetHealthyReportsWhetherStateChanged locks in the changed
+// return value's contract: true only when a recognized backend's health
+// value actually differs from what was previously recorded. Callers (like
+// cmd/loadbalancer's onHealthChange wiring) use this to log state
+// transitions without re-deriving "did this change" themselves.
+func TestRoundRobinSetHealthyReportsWhetherStateChanged(t *testing.T) {
+	a := mustURL(t, "http://backend-a")
+	stranger := mustURL(t, "http://not-a-backend")
+	rr := NewRoundRobin([]*url.URL{a})
+	t.Log("input: fresh balancer over [backend-a], which starts healthy")
+
+	if changed := rr.SetHealthy(a, true); changed {
+		t.Error("got changed=true for a no-op (already healthy) call, want false")
+	}
+	t.Log("step: SetHealthy(a, true) on an already-healthy backend -> changed=false")
+
+	if changed := rr.SetHealthy(a, false); !changed {
+		t.Error("got changed=false for an actual flip healthy->unhealthy, want true")
+	}
+	t.Log("step: SetHealthy(a, false) -> changed=true")
+
+	if changed := rr.SetHealthy(a, false); changed {
+		t.Error("got changed=true for a repeated identical call, want false")
+	}
+	t.Log("step: SetHealthy(a, false) again -> changed=false")
+
+	if changed := rr.SetHealthy(stranger, false); changed {
+		t.Error("got changed=true for an unrecognized backend, want false")
+	}
+	t.Log("output: SetHealthy on an unrecognized backend -> changed=false")
 }
