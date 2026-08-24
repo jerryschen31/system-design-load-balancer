@@ -29,6 +29,17 @@ A technically-accurate explanation in dense prose paragraphs was rated harder to
 - Use sub-headers to break a multi-part explanation into scannable sections rather than one long flowing narrative.
 - Use simple, plain, accurate technical language and avoid unnecessary jargon
 
+## Depth calibration: where to spend detail (set 2026-08-23, after a pacing check)
+
+The user's goal is System Design interview prep in a few months; this codebase is step 1, not the deliverable. They confirmed line-by-line depth after phase 1 (see CLAUDE.md), but explicitly asked to rebalance *where* that depth goes once basic Go idioms started repeating across files -- Go syntax mechanics are the price of admission to read this code, not what an interviewer will ask about. Two different defaults now apply to the two things this skill explains:
+
+- **System Design content -- always full depth, every time it appears:** trade-offs, invariants, concurrency reasoning, failure modes, why a particular design was chosen over an alternative. Never compress this, even if a similar trade-off came up in an earlier file (e.g. "thread-safe shared state" shows up in both the balancer and the health checker for related but distinct reasons -- explain each occurrence on its own terms).
+- **Go language mechanics -- full depth only the first time, or when the syntax itself is load-bearing for the point being made:**
+  - The *first* time a construct appears in this conversation (pointer receivers, interfaces, goroutines, channels, `select`, `defer`, slices, `context`, etc.), explain it fully, as this skill already does.
+  - Once a construct has already been explained earlier in the same conversation, don't re-teach it -- name it in one line ("pointer receiver, same reason as `backendFlag.Set` earlier") and move on to the design point.
+  - Exception: go back to full depth on a *previously-covered* construct when the syntax itself is the reason for a bug, invariant, or design decision -- e.g. the `target := *backend` copy wasn't a generic "here's how copying works" aside, it's *why* `SetHealthy`'s map lookup doesn't break. When the mechanism IS the lesson, teach it fully regardless of repetition.
+  - When in doubt about whether something already landed, a quick check-in beats assuming ("you've seen pointer receivers before -- want the full mechanism again or just the one-line callout?").
+
 ## Steps
 
 1. **Resolve the target.** Figure out exactly what the user means: a whole file, a named function/type, or a line range. If ambiguous (e.g. multiple files could match, or "the health check part" doesn't map to one obvious span), ask a short clarifying question rather than guessing broadly.
@@ -38,7 +49,7 @@ A technically-accurate explanation in dense prose paragraphs was rated harder to
 3. **Break the target into logical chunks** -- not line-by-line, but by meaningful unit (e.g. "imports and package declaration", "the Backend struct and its fields", "the health-check goroutine loop", "the error-handling branch"). For each chunk, in order:
    - Show or reference the code (quote the relevant lines with file:line so the user can jump to it).
    - Explain *what it does* in plain terms.
-   - Explain *any Go syntax/convention/stdlib feature* present that a Go beginner wouldn't know (e.g. `defer`, multiple return values with an `error`, struct embedding, pointer receivers vs. value receivers, `net/http.Handler` interface, `sync.Mutex`, channels, `select`, zero values, named return values, blank identifier `_`). Explain the mechanism, not just "this is idiomatic."
+   - Explain *any Go syntax/convention/stdlib feature* present that a Go beginner wouldn't know (e.g. `defer`, multiple return values with an `error`, struct embedding, pointer receivers vs. value receivers, `net/http.Handler` interface, `sync.Mutex`, channels, `select`, zero values, named return values, blank identifier `_`) -- per the depth calibration above: full mechanism the first time it comes up or when it's load-bearing for the point, a one-line callout on repeat appearances otherwise.
    - Explain *why it's written this way* here specifically -- what it's for in this load balancer, and any System Design concept it embodies (e.g. why a mutex guards the backend list, why round-robin state needs to be thread-safe, why health checks run on a separate goroutine).
 
 4. **Connect the chunks.** After going through them, give a short synthesis of how this file/function fits into the overall system: what calls it, what it calls, what data flows through it, and where it sits in the request lifecycle (e.g. incoming HTTP request -> middleware -> proxy -> backend selection -> health check state).
