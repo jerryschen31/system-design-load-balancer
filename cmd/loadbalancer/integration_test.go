@@ -22,6 +22,7 @@ import (
 
 	"github.com/jerryschen31/system-design-load-balancer/internal/balancer"
 	"github.com/jerryschen31/system-design-load-balancer/internal/healthcheck"
+	"github.com/jerryschen31/system-design-load-balancer/internal/middleware"
 	"github.com/jerryschen31/system-design-load-balancer/internal/proxy"
 )
 
@@ -109,7 +110,7 @@ func TestIntegration_ChecksRouteAroundUnhealthyBackend(t *testing.T) {
 	checker := healthcheck.NewChecker(backends, interval, time.Second, "/health", func(b *url.URL, h bool) { rr.SetHealthy(b, h) }, testLogger())
 	checker.Start(ctx)
 
-	lb := httptest.NewServer(proxy.New(rr, testLogger()))
+	lb := httptest.NewServer(proxy.New(rr, 0, testLogger()))
 	defer lb.Close()
 
 	// Give the checker a few intervals to run its first probe and mark
@@ -171,7 +172,7 @@ func TestStress_RecoveredBackendImmediatelyGetsFullShare(t *testing.T) {
 	checker := healthcheck.NewChecker(urls, interval, time.Second, "/health", onResult, testLogger())
 	checker.Start(ctx)
 
-	lb := httptest.NewServer(proxy.New(rr, testLogger()))
+	lb := httptest.NewServer(proxy.New(rr, 0, testLogger()))
 	defer lb.Close()
 
 	// Confirm backend 0 is actually excluded first, same as the previous
@@ -225,7 +226,7 @@ func TestStress_ConcurrentTrafficSurvivesHealthFlapping(t *testing.T) {
 	checker := healthcheck.NewChecker(backends, interval, time.Second, "/health", func(b *url.URL, h bool) { rr.SetHealthy(b, h) }, testLogger())
 	checker.Start(ctx)
 
-	lb := httptest.NewServer(proxy.New(rr, testLogger()))
+	lb := httptest.NewServer(proxy.New(rr, 0, testLogger()))
 	defer lb.Close()
 
 	stopFlapping := make(chan struct{})
@@ -281,5 +282,168 @@ func TestStress_ConcurrentTrafficSurvivesHealthFlapping(t *testing.T) {
 	}
 	if counts[http.StatusOK] == 0 {
 		t.Fatalf("got %d 2xx responses, want > 0 -- the stable backend should have absorbed traffic throughout", counts[http.StatusOK])
+	}
+}
+
+// TestIntegration_MaxConcurrentProtectsFullStack proves the concurrency
+// limiter works correctly composed with the rest of main()'s real handler
+// chain (Logging -> MaxConcurrent -> proxy, the same order main() builds),
+// not just in isolation against a bare handler the way
+// TestMaxConcurrentAllowsExactlyNInFlight (internal/middleware) does. A
+// single slow backend holds exactly maxConcurrent requests open; a further
+// burst fired while those are in flight must all come back 503 immediately
+// -- proving MaxConcurrent's admission check runs before proxy.New ever
+// picks a backend or dials it, not after.
+func TestIntegration_MaxConcurrentProtectsFullStack(t *testing.T) {
+	const maxConcurrent = 4
+	arrived := make(chan struct{}, maxConcurrent)
+	release := make(chan struct{})
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		arrived <- struct{}{}
+		<-release
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+	t.Logf("input: maxConcurrent=%d, one backend whose handler blocks until released", maxConcurrent)
+
+	target, err := url.Parse(backend.URL)
+	if err != nil {
+		t.Fatalf("parse backend URL: %v", err)
+	}
+	rr := balancer.NewRoundRobin([]*url.URL{target})
+
+	// Same composition order as main(): Logging outermost, MaxConcurrent
+	// next, proxy innermost.
+	handler := middleware.Logging(testLogger())(middleware.MaxConcurrent(maxConcurrent, 0, 0)(proxy.New(rr, 0, testLogger())))
+	lb := httptest.NewServer(handler)
+	defer lb.Close()
+
+	var admittedWg sync.WaitGroup
+	admittedStatuses := make([]int, maxConcurrent)
+	for i := 0; i < maxConcurrent; i++ {
+		admittedWg.Add(1)
+		go func(i int) {
+			defer admittedWg.Done()
+			resp, err := http.Get(lb.URL + "/")
+			if err != nil {
+				t.Errorf("admitted request %d failed: %v", i, err)
+				return
+			}
+			defer resp.Body.Close()
+			admittedStatuses[i] = resp.StatusCode
+		}(i)
+	}
+	for i := 0; i < maxConcurrent; i++ {
+		<-arrived
+	}
+	t.Logf("step: %d requests confirmed in flight at the real backend, through the full stack", maxConcurrent)
+
+	const burstSize = 10
+	var burstWg sync.WaitGroup
+	burstStatuses := make([]int, burstSize)
+	burstWg.Add(burstSize)
+	for i := 0; i < burstSize; i++ {
+		go func(i int) {
+			defer burstWg.Done()
+			resp, err := http.Get(lb.URL + "/")
+			if err != nil {
+				t.Errorf("burst request %d failed: %v", i, err)
+				return
+			}
+			defer resp.Body.Close()
+			burstStatuses[i] = resp.StatusCode
+		}(i)
+	}
+	// release is still open; if any of these were queued instead of
+	// rejected immediately, this Wait would hang until the test's own
+	// timeout, which is the point -- a hang here is a real failure, not
+	// something we need to separately assert on.
+	burstWg.Wait()
+
+	counts := make(map[int]int)
+	for _, status := range burstStatuses {
+		counts[status]++
+	}
+	t.Logf("output: %d-request burst while at capacity -> status counts %v", burstSize, counts)
+	if counts[http.StatusServiceUnavailable] != burstSize {
+		t.Errorf("got status counts %v, want all %d requests to be %d", counts, burstSize, http.StatusServiceUnavailable)
+	}
+
+	close(release)
+	admittedWg.Wait()
+	t.Logf("output: the %d originally-admitted requests all completed with statuses %v", maxConcurrent, admittedStatuses)
+	for i, status := range admittedStatuses {
+		if status != http.StatusOK {
+			t.Errorf("admitted request %d got status %d, want %d", i, status, http.StatusOK)
+		}
+	}
+}
+
+// TestIntegration_QueueAdmitsNearMissRequest is the resolution of the
+// exact scenario discussed while designing phase 4b: with phase 4a's
+// plain MaxConcurrent, a client arriving 1 second before a slot would free
+// up and a client arriving 9 seconds before were treated identically --
+// both rejected outright, because MaxConcurrent had no notion of "how
+// close". With a queue layered on top, a near-miss client (queueing for
+// well under queueWaitTimeout) succeeds instead, through the real full
+// stack: Logging -> MaxConcurrent(with queue) -> proxy -> a real backend.
+func TestIntegration_QueueAdmitsNearMissRequest(t *testing.T) {
+	const maxConcurrent = 2
+	const holderDelay = 150 * time.Millisecond
+	const queueCapacity = 1
+	const queueWaitTimeout = 5 * time.Second // deliberately >> holderDelay
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(holderDelay)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+	t.Logf("input: maxConcurrent=%d, each holder finishes in ~%s; queueCapacity=%d, queueWaitTimeout=%s (well above holderDelay)", maxConcurrent, holderDelay, queueCapacity, queueWaitTimeout)
+
+	target, err := url.Parse(backend.URL)
+	if err != nil {
+		t.Fatalf("parse backend URL: %v", err)
+	}
+	rr := balancer.NewRoundRobin([]*url.URL{target})
+	handler := middleware.Logging(testLogger())(middleware.MaxConcurrent(maxConcurrent, queueCapacity, queueWaitTimeout)(proxy.New(rr, 0, testLogger())))
+	lb := httptest.NewServer(handler)
+	defer lb.Close()
+
+	var holderWg sync.WaitGroup
+	holderWg.Add(maxConcurrent)
+	holderStart := time.Now()
+	for i := 0; i < maxConcurrent; i++ {
+		go func() {
+			defer holderWg.Done()
+			resp, err := http.Get(lb.URL + "/")
+			if err != nil {
+				t.Errorf("holder request failed: %v", err)
+				return
+			}
+			resp.Body.Close()
+		}()
+	}
+
+	// Give the holders a moment to actually be in flight before the
+	// near-miss request arrives -- this only needs to land sometime
+	// before holderDelay elapses, not at a precise instant, so a short
+	// fixed sleep is fine here (unlike detecting an exact event).
+	time.Sleep(20 * time.Millisecond)
+
+	nearMissStart := time.Now()
+	resp, err := http.Get(lb.URL + "/")
+	nearMissElapsed := time.Since(nearMissStart)
+	if err != nil {
+		t.Fatalf("near-miss request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	holderWg.Wait()
+	totalHolderElapsed := time.Since(holderStart)
+	t.Logf("output: near-miss request -> status=%d, waited %s (holders took %s total)", resp.StatusCode, nearMissElapsed, totalHolderElapsed)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("near-miss request got status %d, want %d -- it should have queued and been admitted once a slot freed up, not rejected", resp.StatusCode, http.StatusOK)
+	}
+	if nearMissElapsed >= queueWaitTimeout {
+		t.Errorf("near-miss request took %s (>= queueWaitTimeout %s); it should have been admitted well before the timeout, as soon as a holder finished", nearMissElapsed, queueWaitTimeout)
 	}
 }

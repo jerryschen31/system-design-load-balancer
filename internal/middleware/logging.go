@@ -1,6 +1,7 @@
-// Package middleware holds cross-cutting HTTP concerns (logging now;
-// rate limiting and caching will land here in later phases) that wrap
-// the core proxy handler rather than living inside it.
+// Package middleware holds cross-cutting HTTP concerns (logging and a
+// concurrency limiter now; rate limiting and caching will land here in
+// later phases) that wrap the core proxy handler rather than living
+// inside it.
 package middleware
 
 import (

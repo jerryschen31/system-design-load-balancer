@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -9,6 +10,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jerryschen31/system-design-load-balancer/internal/balancer"
 )
@@ -30,9 +32,18 @@ func singleBackend(t *testing.T, backendURL string) balancer.Balancer {
 	return balancer.NewRoundRobin([]*url.URL{target})
 }
 
+// newProxyServer builds a proxy with no backend timeout (0 = disabled) --
+// the tests using it aren't exercising timeout behavior, so they keep the
+// original "wait indefinitely" semantics. newProxyServerWithTimeout below
+// is for the tests that specifically are.
 func newProxyServer(t *testing.T, backendURL string) *httptest.Server {
 	t.Helper()
-	return httptest.NewServer(New(singleBackend(t, backendURL), newTestLogger()))
+	return httptest.NewServer(New(singleBackend(t, backendURL), 0, newTestLogger()))
+}
+
+func newProxyServerWithTimeout(t *testing.T, backendURL string, backendTimeout time.Duration) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(New(singleBackend(t, backendURL), backendTimeout, newTestLogger()))
 }
 
 func TestForwardsRequestToBackend(t *testing.T) {
@@ -141,7 +152,7 @@ func TestHopByHopHeaderNotForwarded(t *testing.T) {
 func TestBackendDownReturns502(t *testing.T) {
 	// A backend URL that nothing is listening on: connection refused.
 	const unreachableURL = "http://127.0.0.1:1"
-	lb := httptest.NewServer(New(singleBackend(t, unreachableURL), newTestLogger()))
+	lb := httptest.NewServer(New(singleBackend(t, unreachableURL), 0, newTestLogger()))
 	defer lb.Close()
 	t.Logf("input: backend %s is down; client sends GET / through load balancer %s", unreachableURL, lb.URL)
 
@@ -159,9 +170,9 @@ func TestBackendDownReturns502(t *testing.T) {
 
 func TestNewAllowsNilLogger(t *testing.T) {
 	const unreachableURL = "http://127.0.0.1:1"
-	lb := httptest.NewServer(New(singleBackend(t, unreachableURL), nil))
+	lb := httptest.NewServer(New(singleBackend(t, unreachableURL), 0, nil))
 	defer lb.Close()
-	t.Logf("input: proxy.New(%s, nil)", unreachableURL)
+	t.Logf("input: proxy.New(%s, 0, nil)", unreachableURL)
 
 	resp, err := http.Get(lb.URL + "/")
 	if err != nil {
@@ -188,7 +199,7 @@ func TestNoHealthyBackendsReturns502(t *testing.T) {
 	rr.SetHealthy(target, false)
 	t.Logf("input: balancer's only backend (%s) marked unhealthy", target)
 
-	lb := httptest.NewServer(New(rr, newTestLogger()))
+	lb := httptest.NewServer(New(rr, 0, newTestLogger()))
 	defer lb.Close()
 
 	resp, err := http.Get(lb.URL)
@@ -217,7 +228,7 @@ func TestNoHealthyBackendsReturns502(t *testing.T) {
 }
 
 func TestNewPanicsOnNilBalancer(t *testing.T) {
-	t.Log("input: proxy.New(nil, nil)")
+	t.Log("input: proxy.New(nil, 0, nil)")
 
 	defer func() {
 		r := recover()
@@ -227,7 +238,93 @@ func TestNewPanicsOnNilBalancer(t *testing.T) {
 		t.Logf("output: New panicked as expected: %v", r)
 	}()
 
-	New(nil, nil)
+	New(nil, 0, nil)
+}
+
+// TestBackendTimeoutReturns502 proves the proxy's own backendTimeout cuts a
+// slow backend off, without depending on the client having set any timeout
+// of its own -- http.DefaultClient here has none. This is the fix for the
+// weakness TestStress_SlowBackendHasNoTimeout (stress_test.go) documented
+// back in phase 1.
+func TestBackendTimeoutReturns502(t *testing.T) {
+	const backendDelay = 500 * time.Millisecond
+	const backendTimeout = 50 * time.Millisecond
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(backendDelay)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	lb := newProxyServerWithTimeout(t, backend.URL, backendTimeout)
+	defer lb.Close()
+	t.Logf("input: backend sleeps %s, proxy backendTimeout is %s, client has no timeout of its own", backendDelay, backendTimeout)
+
+	start := time.Now()
+	resp, err := http.Get(lb.URL + "/")
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("request through proxy failed: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+
+	t.Logf("output: status=%d body=%q elapsed=%s", resp.StatusCode, string(body), elapsed)
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Errorf("got status %d, want %d", resp.StatusCode, http.StatusBadGateway)
+	}
+	const wantBody = "backend request timed out\n"
+	if string(body) != wantBody {
+		t.Errorf("got body %q, want %q", string(body), wantBody)
+	}
+	if elapsed >= backendDelay {
+		t.Errorf("client waited %s (>= full backend delay %s); the proxy's own timeout (%s) should have cut it off first", elapsed, backendDelay, backendTimeout)
+	}
+}
+
+// TestBackendTimeoutAllowsSlowStreamedBodyWithinBudget guards against the
+// specific bug cancelOnCloseBody exists to prevent: if the round trip's
+// context were cancelled the instant RoundTrip returned (right after
+// headers), rather than deferred to resp.Body.Close(), this test's
+// streamed, multi-chunk body -- which takes some real time to fully
+// arrive, but well within backendTimeout -- would be truncated even though
+// nothing actually timed out.
+func TestBackendTimeoutAllowsSlowStreamedBodyWithinBudget(t *testing.T) {
+	const chunkDelay = 20 * time.Millisecond
+	const numChunks = 5
+	const backendTimeout = 2 * time.Second
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			t.Fatal("httptest ResponseWriter does not support flushing")
+		}
+		w.WriteHeader(http.StatusOK)
+		for i := 0; i < numChunks; i++ {
+			fmt.Fprintf(w, "chunk-%d ", i)
+			flusher.Flush()
+			time.Sleep(chunkDelay)
+		}
+	}))
+	defer backend.Close()
+
+	lb := newProxyServerWithTimeout(t, backend.URL, backendTimeout)
+	defer lb.Close()
+	t.Logf("input: backend streams %d chunks, %s apart, total ~%s; backendTimeout is %s (well above that)", numChunks, chunkDelay, time.Duration(numChunks)*chunkDelay, backendTimeout)
+
+	resp, err := http.Get(lb.URL + "/")
+	if err != nil {
+		t.Fatalf("request through proxy failed: %v", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("reading response body failed: %v -- this is the exact failure mode of cancelling too early", err)
+	}
+
+	want := "chunk-0 chunk-1 chunk-2 chunk-3 chunk-4 "
+	t.Logf("output: status=%d body=%q", resp.StatusCode, string(body))
+	if string(body) != want {
+		t.Errorf("got body %q, want %q -- body was truncated, which means the round trip's context was cancelled before the body finished streaming", string(body), want)
+	}
 }
 
 // TestRewriteLogsRoutingDecision confirms the fix for the review comment
@@ -241,7 +338,7 @@ func TestRewriteLogsRoutingDecision(t *testing.T) {
 
 	var buf bytes.Buffer
 	logger := log.New(&buf, "", 0)
-	lb := httptest.NewServer(New(singleBackend(t, backend.URL), logger))
+	lb := httptest.NewServer(New(singleBackend(t, backend.URL), 0, logger))
 	defer lb.Close()
 	t.Logf("input: GET / through the load balancer, backend is %s", backend.URL)
 

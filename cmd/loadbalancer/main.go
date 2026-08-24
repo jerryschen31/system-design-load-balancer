@@ -81,6 +81,10 @@ func main() {
 	healthCheckInterval := flag.Duration("health-check-interval", 5*time.Second, "how often to actively poll each backend's health check path")
 	healthCheckTimeout := flag.Duration("health-check-timeout", 2*time.Second, "how long a single health check probe may take before it counts as a failure")
 	healthCheckPath := flag.String("health-check-path", "/health", "path to request on each backend for health checks")
+	backendTimeout := flag.Duration("backend-timeout", 10*time.Second, "max time to wait on a single backend request (headers + full body); 0 disables the timeout and waits indefinitely")
+	maxConcurrent := flag.Int("max-concurrent", 100, "max number of requests the load balancer will process at once")
+	queueCapacity := flag.Int("queue-capacity", 20, "max number of requests allowed to wait for a free slot once max-concurrent is reached; 0 disables queueing (immediate 503 instead)")
+	queueWaitTimeout := flag.Duration("queue-wait-timeout", 2*time.Second, "max time a request will wait in the queue for a free slot before getting a 503; ignored if queue-capacity is 0")
 	flag.Parse()
 
 	targets, err := parseBackendURLs(backends)
@@ -88,11 +92,11 @@ func main() {
 		log.Fatalf("%v", err)
 	}
 
-	// This is the core composition. proxy.New(rr, logger) returns an *httputil.ReverseProxy — a standard-library type that satisfies http.Handler (an interface requiring one method, ServeHTTP(ResponseWriter, *Request) — anything with that method can handle HTTP requests). middleware.Logging(logger) returns a function of type func(http.Handler) http.Handler — a function that takes a handler and returns a new handler wrapping it. So middleware.Logging(logger)(proxy.New(rr, logger)) is two calls chained: first build the logging wrapper (configured with logger), then immediately call it on the proxy handler. The result, handler, is: request comes in → logging middleware runs first → delegates to the reverse proxy. This is Go's idiomatic middleware pattern — no framework, just functions wrapping functions, all typed through the one http.Handler interface.
+	// This is the core composition. proxy.New(rr, backendTimeout, logger) returns an *httputil.ReverseProxy — a standard-library type that satisfies http.Handler (an interface requiring one method, ServeHTTP(ResponseWriter, *Request) — anything with that method can handle HTTP requests). Each middleware -- middleware.Logging(logger), middleware.MaxConcurrent(n) -- is a function of type func(http.Handler) http.Handler: it takes a handler and returns a new handler wrapping it. Chaining them like this builds up layers: middleware.Logging(logger)(middleware.MaxConcurrent(*maxConcurrent)(proxy.New(...))) means a request goes through Logging first, then MaxConcurrent, then finally the proxy. That order is deliberate, not arbitrary: Logging has to be outermost so it sees -- and logs -- every request, including the ones MaxConcurrent rejects with a 503 before they ever reach the proxy. If the order were reversed, a rejected request would never reach Logging at all, and overload events would be invisible in the logs.
 	logger := log.New(os.Stdout, "", log.LstdFlags)
 
 	rr := balancer.NewRoundRobin(targets)
-	handler := middleware.Logging(logger)(proxy.New(rr, logger))
+	handler := middleware.Logging(logger)(middleware.MaxConcurrent(*maxConcurrent, *queueCapacity, *queueWaitTimeout)(proxy.New(rr, *backendTimeout, logger)))
 
 	server := &http.Server{
 		Addr:    *listenAddr,

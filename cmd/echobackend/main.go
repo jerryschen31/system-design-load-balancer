@@ -13,7 +13,12 @@
 // outright (which phases 1-2 already cover via connection-refused). Plus a
 // /hang endpoint that never responds, for demonstrating that the load
 // balancer currently has nothing bounding how long it will wait on a
-// backend that's healthy but stuck.
+// backend that's healthy but stuck. Plus a /sleep?seconds=N endpoint that
+// responds after a controllable delay (unlike /hang, which never responds
+// on its own) -- the fixture for phase 4a's backend-response timeout and
+// concurrency limiter: fire enough concurrent /sleep requests and they pile
+// up until the limiter's ceiling is hit, or set a backend timeout shorter
+// than the sleep and watch the load balancer cut the request short.
 package main
 
 import (
@@ -22,7 +27,9 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"sync/atomic"
+	"time"
 )
 
 // newHandler builds the handler this backend serves every non-health
@@ -92,6 +99,69 @@ func newHangHandler(logger *log.Logger) http.HandlerFunc {
 	}
 }
 
+// defaultSleepSeconds is used when /sleep is requested with no ?seconds=
+// parameter. maxSleepSeconds caps whatever value is requested, so a typo'd
+// query string (or an accidental extra zero) can't hang a demo terminal
+// indefinitely -- this is a manual-testing fixture, not something that
+// needs to support arbitrary durations.
+const (
+	defaultSleepSeconds = 2
+	maxSleepSeconds     = 30
+)
+
+// parseSleepSeconds parses the ?seconds= query value into a duration,
+// applying the default (raw == "") and the maxSleepSeconds cap. Split out
+// from newSleepHandler as a pure function -- no request, no I/O -- so tests
+// can check the parsing and capping logic directly instead of having to
+// exercise it by actually waiting out a real sleep.
+func parseSleepSeconds(raw string) (int, error) {
+	if raw == "" {
+		return defaultSleepSeconds, nil
+	}
+	parsed, err := strconv.Atoi(raw)
+	if err != nil || parsed < 0 {
+		return 0, fmt.Errorf("invalid seconds=%q: must be a non-negative integer", raw)
+	}
+	if parsed > maxSleepSeconds {
+		parsed = maxSleepSeconds
+	}
+	return parsed, nil
+}
+
+// newSleepHandler blocks for the requested number of seconds (default
+// defaultSleepSeconds, capped at maxSleepSeconds) before responding 200,
+// unless the request's context is cancelled first. The select below races
+// two channels: time.After's, which fires once the sleep duration elapses,
+// against r.Context().Done(), which fires the moment something upstream
+// gives up on this request -- either the client itself disconnecting, or
+// (once phase 4a's backend timeout exists) the load balancer's own
+// context.WithTimeout on its outbound request to this backend expiring.
+// Whichever fires first wins the select; the other branch is simply never
+// taken. This is the same shape as newHangHandler's <-r.Context().Done(),
+// except here there's also a real "finished normally" outcome to race
+// against, not just the cancellation.
+func newSleepHandler(logger *log.Logger) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		seconds, err := parseSleepSeconds(r.URL.Query().Get("seconds"))
+		if err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			fmt.Fprintln(w, err)
+			return
+		}
+
+		start := time.Now()
+		logger.Printf("%s %s: sleeping %ds", r.Method, r.URL.Path, seconds)
+		select {
+		case <-time.After(time.Duration(seconds) * time.Second):
+			logger.Printf("%s %s: woke up after %ds, responding 200", r.Method, r.URL.Path, seconds)
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprintf(w, "slept %ds\n", seconds)
+		case <-r.Context().Done():
+			logger.Printf("%s %s: cancelled after %v (was sleeping for %ds)", r.Method, r.URL.Path, time.Since(start), seconds)
+		}
+	}
+}
+
 func main() {
 	listenAddr := flag.String("listen", ":9001", "address for this backend to listen on")
 	flag.Parse()
@@ -106,6 +176,7 @@ func main() {
 	mux.Handle("/health", newHealthHandler(logger, &healthy))
 	mux.Handle("/health/toggle", newToggleHandler(logger, &healthy))
 	mux.Handle("/hang", newHangHandler(logger))
+	mux.Handle("/sleep", newSleepHandler(logger))
 	mux.Handle("/", newHandler(logger, *listenAddr))
 
 	if err := http.ListenAndServe(*listenAddr, mux); err != nil {
