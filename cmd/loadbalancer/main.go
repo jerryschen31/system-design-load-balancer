@@ -88,12 +88,12 @@ func main() {
 		log.Fatalf("%v", err)
 	}
 
+	// This is the core composition. proxy.New(rr, logger) returns an *httputil.ReverseProxy — a standard-library type that satisfies http.Handler (an interface requiring one method, ServeHTTP(ResponseWriter, *Request) — anything with that method can handle HTTP requests). middleware.Logging(logger) returns a function of type func(http.Handler) http.Handler — a function that takes a handler and returns a new handler wrapping it. So middleware.Logging(logger)(proxy.New(rr, logger)) is two calls chained: first build the logging wrapper (configured with logger), then immediately call it on the proxy handler. The result, handler, is: request comes in → logging middleware runs first → delegates to the reverse proxy. This is Go's idiomatic middleware pattern — no framework, just functions wrapping functions, all typed through the one http.Handler interface.
 	logger := log.New(os.Stdout, "", log.LstdFlags)
 
 	rr := balancer.NewRoundRobin(targets)
 	handler := middleware.Logging(logger)(proxy.New(rr, logger))
 
-	// This is the core composition. proxy.New(rr, logger) returns an *httputil.ReverseProxy — a standard-library type that satisfies http.Handler (an interface requiring one method, ServeHTTP(ResponseWriter, *Request) — anything with that method can handle HTTP requests). middleware.Logging(logger) returns a function of type func(http.Handler) http.Handler — a function that takes a handler and returns a new handler wrapping it. So middleware.Logging(logger)(proxy.New(rr, logger)) is two calls chained: first build the logging wrapper (configured with logger), then immediately call it on the proxy handler. The result, handler, is: request comes in → logging middleware runs first → delegates to the reverse proxy. This is Go's idiomatic middleware pattern — no framework, just functions wrapping functions, all typed through the one http.Handler interface.
 	server := &http.Server{
 		Addr:    *listenAddr,
 		Handler: handler,
