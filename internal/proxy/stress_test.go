@@ -9,16 +9,16 @@ import (
 	"time"
 )
 
-// TestStress_SlowBackendHasNoTimeout demonstrates a real weakness of this
-// phase: the proxy places no time limit on waiting for the backend. If the
-// client hadn't set its own timeout, this request would have hung for the
-// full backend delay -- and with enough concurrent hung requests, the load
-// balancer's own resources (goroutines, file descriptors) would be tied up
-// indefinitely. See notes/phase-1-single-backend-proxy.md for the fix plan.
-func TestStress_SlowBackendHasNoTimeout(t *testing.T) {
+// TestStress_DisabledTimeoutWaitsIndefinitely confirms the documented
+// opt-out (backendTimeout <= 0) still behaves exactly like phase 1-3's
+// original proxy: no timeout of its own, so only the client's own timeout
+// (if any) cuts a slow request off. This used to be this suite's
+// KNOWN WEAKNESS -- phase 4a's actual fix, and the test proving it, is
+// TestBackendTimeoutReturns502 in proxy_test.go.
+func TestStress_DisabledTimeoutWaitsIndefinitely(t *testing.T) {
 	const backendDelay = 300 * time.Millisecond
 	const clientTimeout = 50 * time.Millisecond
-	t.Logf("input: backend sleeps for %s; client timeout is %s", backendDelay, clientTimeout)
+	t.Logf("input: backendTimeout=0 (disabled); backend sleeps for %s; client timeout is %s", backendDelay, clientTimeout)
 
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Log("backend step: request reached backend; backend is now sleeping")
@@ -27,7 +27,7 @@ func TestStress_SlowBackendHasNoTimeout(t *testing.T) {
 	}))
 	defer backend.Close()
 
-	lb := newProxyServer(t, backend.URL)
+	lb := newProxyServer(t, backend.URL) // backendTimeout=0
 	defer lb.Close()
 
 	client := &http.Client{Timeout: clientTimeout}
@@ -36,13 +36,12 @@ func TestStress_SlowBackendHasNoTimeout(t *testing.T) {
 	elapsed := time.Since(start)
 
 	if err == nil {
-		t.Fatalf("expected the client's own timeout to fire, since the proxy enforces no timeout of its own")
+		t.Fatalf("expected the client's own timeout to fire, since backendTimeout=0 disables the proxy's own timeout")
 	}
 	if elapsed >= backendDelay {
-		t.Errorf("client waited %s (>= full backend delay of %s); expected the client's timeout (~%s) to cut it off first, proving the proxy itself never would have", elapsed, backendDelay, clientTimeout)
+		t.Errorf("client waited %s (>= full backend delay of %s); expected the client's timeout (~%s) to cut it off first, proving the proxy itself never would have with backendTimeout=0", elapsed, backendDelay, clientTimeout)
 	}
-	t.Logf("output: client returned after %s with error %v", elapsed, err)
-	t.Logf("KNOWN WEAKNESS: proxy has no timeout on backend responses (aborted after %s only because the client protected itself; backend needed %s). A hung backend can hold load balancer resources indefinitely.", elapsed, backendDelay)
+	t.Logf("output: client returned after %s with error %v -- opt-out confirmed working", elapsed, err)
 }
 
 // TestStress_ConcurrentRequestsHandledConcurrently fires a burst of
@@ -105,7 +104,7 @@ func TestStress_BurstAgainstUnreachableBackend(t *testing.T) {
 	const numRequests = 50
 	t.Logf("input: %d concurrent requests against a load balancer whose only backend is down", numRequests)
 
-	lb := httptest.NewServer(New(singleBackend(t, "http://127.0.0.1:1"), newTestLogger()))
+	lb := httptest.NewServer(New(singleBackend(t, "http://127.0.0.1:1"), 0, newTestLogger()))
 	defer lb.Close()
 
 	var wg sync.WaitGroup

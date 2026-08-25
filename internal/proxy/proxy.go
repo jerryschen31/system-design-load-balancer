@@ -3,11 +3,13 @@
 package proxy
 
 import (
+	"context"
 	"errors"
 	"io"
 	"log"
 	"net/http"
 	"net/http/httputil"
+	"time"
 
 	"github.com/jerryschen31/system-design-load-balancer/internal/balancer"
 )
@@ -28,12 +30,43 @@ func (f roundTripperFunc) RoundTrip(r *http.Request) (*http.Response, error) {
 	return f(r)
 }
 
+// cancelOnCloseBody wraps a backend response body so the context.WithTimeout
+// guarding that round trip is cancelled once the body has been fully read
+// and closed -- not the instant RoundTrip returns. RoundTrip returning only
+// means the response headers arrived; httputil.ReverseProxy still streams
+// resp.Body back to the client afterward, on the same goroutine, by reading
+// it as it copies. Calling cancel() right after RoundTrip returns (the
+// naive placement, directly next to context.WithTimeout) would fail every
+// one of those later reads with "context canceled", because net/http ties
+// body reads to the request's context -- silently truncating any response
+// whose body didn't already fully arrive in the same read as the headers.
+// Deferring cancel to Close() instead means the timeout keeps counting down
+// for the whole response (headers + body), which is what "backend timeout"
+// should mean, while still releasing the timer's resources promptly once
+// the body is actually done, rather than leaking it until backendTimeout
+// elapses on its own.
+type cancelOnCloseBody struct {
+	io.ReadCloser
+	cancel context.CancelFunc
+}
+
+func (b *cancelOnCloseBody) Close() error {
+	defer b.cancel()
+	return b.ReadCloser.Close()
+}
+
 // New builds a reverse proxy that forwards every request to a backend
 // chosen by b. Each request picks its target independently by calling
 // b.Next(), so which backend handles a given request is entirely up to
 // the balancer's selection policy (round-robin, and later phases' other
 // strategies), not anything the proxy itself decides.
-func New(b balancer.Balancer, logger *log.Logger) *httputil.ReverseProxy {
+//
+// backendTimeout bounds how long a single request to a backend -- from the
+// moment it's sent until its response body is fully read -- may take before
+// the proxy gives up on it and fails the request with a 502, independent of
+// whether the client set any timeout of its own. backendTimeout <= 0
+// disables this and restores the earlier behavior of waiting indefinitely.
+func New(b balancer.Balancer, backendTimeout time.Duration, logger *log.Logger) *httputil.ReverseProxy {
 	if b == nil {
 		// Fail at construction, not on the first request: a nil balancer
 		// would otherwise panic inside Rewrite on whichever goroutine
@@ -80,21 +113,44 @@ func New(b balancer.Balancer, logger *log.Logger) *httputil.ReverseProxy {
 				// default transport try to dial an empty host.
 				return nil, errNoHealthyBackends
 			}
-			return http.DefaultTransport.RoundTrip(r)
+			if backendTimeout <= 0 {
+				return http.DefaultTransport.RoundTrip(r)
+			}
+			// ctx is derived from r.Context(), the incoming client
+			// request's context -- so this timeout is layered on top of,
+			// not instead of, the existing cancellation the client
+			// disconnecting or the LB shutting down already provides.
+			// Whichever deadline is sooner wins.
+			ctx, cancel := context.WithTimeout(r.Context(), backendTimeout)
+			resp, err := http.DefaultTransport.RoundTrip(r.WithContext(ctx))
+			if err != nil {
+				// No response body to defer cancellation on -- the round
+				// trip never succeeded, so release the timer now.
+				cancel()
+				return nil, err
+			}
+			resp.Body = &cancelOnCloseBody{ReadCloser: resp.Body, cancel: cancel}
+			return resp, nil
 		}),
 		ErrorLog: logger,
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			logger.Printf("backend error for %s %s: %v", r.Method, r.URL.Path, err)
-			if errors.Is(err, errNoHealthyBackends) {
+			switch {
+			case errors.Is(err, errNoHealthyBackends):
 				// A specific, honest message for the specific case: the
 				// balancer itself refused to pick a target, as opposed to
 				// picking one and having the request to it fail. http.Error
 				// sets Content-Type, writes the status, and writes the
 				// message plus a trailing newline in one call.
 				http.Error(w, "no healthy backends available", http.StatusBadGateway)
-				return
+			case errors.Is(err, context.DeadlineExceeded):
+				// Distinct from a generic backend-down 502: the backend
+				// was reachable and presumably still working, it just
+				// didn't finish within backendTimeout.
+				http.Error(w, "backend request timed out", http.StatusBadGateway)
+			default:
+				w.WriteHeader(http.StatusBadGateway)
 			}
-			w.WriteHeader(http.StatusBadGateway)
 		},
 	}
 }

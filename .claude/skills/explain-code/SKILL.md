@@ -18,11 +18,12 @@ The user is a computational biologist / bioinformatics engineer, Caltech CS back
 - Don't assume familiarity with terms common in backend work even if they sound basic: socket, goroutine, channel, mutex, interface, context, hop-by-hop header, connection pooling, etc. Define each the first time it appears in this conversation.
 - Assume general programming literacy (loops, functions, types) from their CS background, but not Go-specific idiom or stdlib knowledge.
 
-## Format (as important as content -- confirmed 2026-08-23 against a side-by-side comparison)
+## Format (as important as content -- confirmed 2026-08-23 against a side-by-side comparison; sharpened 2026-08-24)
 
 A technically-accurate explanation in dense prose paragraphs was rated harder to follow than a shorter, more scannable one covering the same mechanism. Default to the terser style:
 
-- Lead with a one- or two-sentence plain-language summary of what the construct does, *before* the mechanism detail.
+- Lead with a one- or two-sentence plain-language summary of what the construct does, *before* the mechanism detail -- and that summary must contain zero function/variable names. State the general problem/shape first ("several goroutines can be waiting for the same limited resource"), then bring in code identifiers only once that plain-language picture is in place. A paragraph that names two or more functions/variables before the reader has that scaffolding reads as expert-to-expert shorthand, not teaching -- this was called out explicitly as the recurring failure mode to avoid (2026-08-24).
+- Draw a diagram (ASCII flowchart, sequence, or state diagram) whenever the construct involves flow, ordering, states, or a sequence of events. This is the default for that kind of explanation, not something to reach for only when stuck for words.
 - Prefer short bullet points over paragraphs. A paragraph is acceptable for a single connected thought, but don't stack more than ~3-4 sentences of unbroken prose.
 - Show a minimal, standalone usage snippet when it clarifies a pattern (not just the code already in the file -- a stripped-down illustrative example, e.g. the create/defer/cancel-later shape for `context.WithCancel`).
 - When a construct has a common misconception or a sharp edge, give it its own short "what it does NOT do" callout (e.g. context cancellation is cooperative, not preemptive -- `cancel()` doesn't kill a goroutine, it only closes a channel that well-behaved code has to check).
