@@ -137,14 +137,13 @@ func main() {
 		}
 	}()
 
-	// chan os.Signal: a channel is Go's built-in typed pipe for passing values between goroutines, with the runtime handling the
-	// synchronization. make(chan os.Signal, 1) creates one with buffer capacity 1 — meaning one value can be sent into it without
-	// a receiver ready to take it immediately (an unbuffered channel, capacity 0, would block the sender until someone receives).
+	// chan os.Signal: a channel is Go's built-in typed pipe for passing values between goroutines, with the runtime handling the synchronization. make(chan os.Signal, 1) creates one with buffer capacity 1 —
+	// meaning one value can be sent into it without a receiver ready to take it immediately (an unbuffered channel, capacity 0, would block the sender until someone receives).
 	// In plain language, I think this means stop is waiting for a SINGLE signal.
-	// signal.Notify(stop, os.Interrupt, syscall.SIGTERM) tells the Go runtime "when the OS delivers SIGINT (Ctrl+C) or SIGTERM
-	// (the default signal kill sends) to this process, deliver it into the stop channel instead of the process's default action
-	// (which would just terminate immediately)."
 	stop := make(chan os.Signal, 1)
+
+	// signal.Notify(stop, os.Interrupt, syscall.SIGTERM) tells the Go runtime "when the OS delivers SIGINT (Ctrl+C) or SIGTERM (the default signal kill sends)
+	// to this process, deliver it into the stop channel instead of the process's default action (which would just terminate immediately)."
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
 
 	// <-stop: the receive operator. This line blocks — main's goroutine sits here doing nothing — until a value arrives on stop.
@@ -152,9 +151,12 @@ func main() {
 	// serves requests, until an OS signal wakes it up.
 	// Once unblocked (upon SIGINT Ctrl+C or SIGTERM kill signal): cancelHealth() below stops the health-check polling goroutines.
 	<-stop
-
 	logger.Println("shutting down...")
+
+	// stops the health-check polling goroutines
 	cancelHealth()
+
+	// shut down the server
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := server.Shutdown(ctx); err != nil {
