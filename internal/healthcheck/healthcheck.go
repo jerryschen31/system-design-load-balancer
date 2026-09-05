@@ -166,5 +166,14 @@ func (c *Checker) probe(ctx context.Context, backend *url.URL) {
 // health transition (as opposed to every individual probe result, which
 // would mostly just repeat "still healthy" every interval).
 func (c *Checker) report(backend *url.URL, healthy bool) {
+	// The reporter's return value is the whole reason this method exists.
+	// A probe fires every interval and almost always finds the same
+	// answer as last time, so logging every result would bury real events
+	// under a steady stream of "still healthy". The reporter already has
+	// to compare the new value against the recorded one to decide whether
+	// to republish its state, so it hands that comparison back as
+	// changed, and only a genuine transition gets logged here.
+	if c.reporter.SetHealthy(backend, healthy) {
 		c.logger.Printf("healthcheck: backend %s health changed: healthy=%v", backend, healthy)
+	}
 }
