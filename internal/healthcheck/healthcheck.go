@@ -75,6 +75,7 @@ func (c *Checker) Start(ctx context.Context) {
 	}
 }
 
+// run: runs a continuous health check loop for the given backend URL, performing an initial probe immediately and then repeating at each interval until the context is cancelled.
 func (c *Checker) run(ctx context.Context, backend *url.URL) {
 	c.probe(ctx, backend)
 
@@ -93,7 +94,7 @@ func (c *Checker) run(ctx context.Context, backend *url.URL) {
 	}
 }
 
-// probe runs a single health check against backend and reports the result.
+// probe: runs a single health check against backend URL and reports the result.
 func (c *Checker) probe(ctx context.Context, backend *url.URL) {
 	checkCtx, cancel := context.WithTimeout(ctx, c.timeout)
 	defer cancel()
@@ -102,6 +103,7 @@ func (c *Checker) probe(ctx context.Context, backend *url.URL) {
 	target.Path = c.path
 	target.RawQuery = ""
 
+	// Builds the HTTP GET request for the health check using the target URL. This only errors on malformed target URLs or context issues, still worth catching.
 	req, err := http.NewRequestWithContext(checkCtx, http.MethodGet, target.String(), nil)
 	if err != nil {
 		c.logger.Printf("healthcheck: building request for %s: %v", backend, err)
@@ -109,21 +111,19 @@ func (c *Checker) probe(ctx context.Context, backend *url.URL) {
 		return
 	}
 
+	// this performs the actual HTTP health-check request to the backend using the dedicated client for health checks
 	resp, err := c.client.Do(req)
 	if err != nil {
-		// Covers connection refused, DNS failure, and checkCtx's
-		// timeout firing mid-request -- all of these mean the backend
-		// isn't answering, so they're all just "unhealthy" here.
+		// Covers connection refused, DNS failure, and checkCtx's timeout firing mid-request -- all of these mean the backend isn't answering, so they're all labeled as just "unhealthy" here.
 		c.logger.Printf("healthcheck: %s: %v", backend, err)
 		c.onResult(backend, false)
 		return
 	}
-	// Drain and close the body so the underlying TCP connection can be
-	// returned to the client's idle pool and reused by the next probe
-	// of this backend, the same connection-reuse behavior phase 2
-	// confirmed for the proxy's own backend requests.
+
+	// Drain and close the response body to allow this probe connection to be recycled to the client's idle pool and reused by the next probe.
+	// Copy commands simply copies the entire contents of the response body to the specified destination (in this case, io.Discard).
 	io.Copy(io.Discard, resp.Body)
-	resp.Body.Close()
+	defer resp.Body.Close()
 
 	healthy := resp.StatusCode >= 200 && resp.StatusCode < 300
 	if !healthy {
