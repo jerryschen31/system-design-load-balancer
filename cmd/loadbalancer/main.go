@@ -115,23 +115,14 @@ func main() {
 	// Note cancelHealth can be called explicitly as well, and is in fact called explicitly at line 120 during normal shutdown — the defer is the backstop, not the primary mechanism.
 	defer cancelHealth()
 
-	// onHealthChange wraps rr.SetHealthy rather than passing it to the
-	// checker directly. rr.SetHealthy now returns a bool reporting whether
-	// this particular call actually flipped a backend's routing state (as
-	// opposed to reporting the same health value it already had) --
-	// RoundRobin computes that fact anyway as part of deciding whether to
-	// rebuild its healthy slice, so it's surfaced here instead of the
-	// caller re-deriving it independently. This closure is what decides
-	// that fact is worth a log line: the balancer package itself takes no
-	// logger and does no I/O, keeping it pure and easy to test in
-	// isolation -- observability is wired in at the composition root
-	// (here), not baked into the reusable library packages.
-	onHealthChange := func(backend *url.URL, healthy bool) {
-		if rr.SetHealthy(backend, healthy) {
-			logger.Printf("backend %s health changed: healthy=%v", backend, healthy)
-		}
-	}
-	checker := healthcheck.NewChecker(targets, *healthCheckInterval, *healthCheckTimeout, *healthCheckPath, onHealthChange, logger)
+	// rr is passed directly as the health checker's reporter: RoundRobin's
+	// SetHealthy method already matches the healthcheck.HealthReporter
+	// interface, so no adapter is needed here. healthcheck logs the health
+	// transition itself (using the "changed" bool SetHealthy returns),
+	// consistent with the other health-check events it already logs
+	// (probe errors, non-2xx statuses) -- there's no longer any
+	// health-check-specific wiring left to do at the composition root.
+	checker := healthcheck.NewChecker(targets, *healthCheckInterval, *healthCheckTimeout, *healthCheckPath, rr, logger)
 	checker.Start(healthCtx)
 
 	// go func() { ... }(): launches a goroutine — a lightweight, independently-scheduled function execution managed by the Go runtime

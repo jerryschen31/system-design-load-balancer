@@ -107,7 +107,7 @@ func TestIntegration_ChecksRouteAroundUnhealthyBackend(t *testing.T) {
 	const interval = 20 * time.Millisecond
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	checker := healthcheck.NewChecker(backends, interval, time.Second, "/health", func(b *url.URL, h bool) { rr.SetHealthy(b, h) }, testLogger())
+	checker := healthcheck.NewChecker(backends, interval, time.Second, "/health", rr, testLogger())
 	checker.Start(ctx)
 
 	lb := httptest.NewServer(proxy.New(rr, 0, testLogger()))
@@ -159,12 +159,13 @@ func TestStress_RecoveredBackendImmediatelyGetsFullShare(t *testing.T) {
 	// mechanism (if one existed) hide behind extra elapsed time.
 	detected := make(chan struct{})
 	var once sync.Once
-	onResult := func(b *url.URL, healthy bool) {
-		rr.SetHealthy(b, healthy)
+	onResult := healthcheck.HealthReporterFunc(func(b *url.URL, healthy bool) bool {
+		changed := rr.SetHealthy(b, healthy)
 		if healthy && b.String() == urls[0].String() {
 			once.Do(func() { close(detected) })
 		}
-	}
+		return changed
+	})
 
 	const interval = 15 * time.Millisecond
 	ctx, cancel := context.WithCancel(context.Background())
@@ -223,7 +224,7 @@ func TestStress_ConcurrentTrafficSurvivesHealthFlapping(t *testing.T) {
 	const interval = 15 * time.Millisecond
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	checker := healthcheck.NewChecker(backends, interval, time.Second, "/health", func(b *url.URL, h bool) { rr.SetHealthy(b, h) }, testLogger())
+	checker := healthcheck.NewChecker(backends, interval, time.Second, "/health", rr, testLogger())
 	checker.Start(ctx)
 
 	lb := httptest.NewServer(proxy.New(rr, 0, testLogger()))
