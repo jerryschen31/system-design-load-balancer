@@ -166,7 +166,5 @@ func (c *Checker) probe(ctx context.Context, backend *url.URL) {
 // health transition (as opposed to every individual probe result, which
 // would mostly just repeat "still healthy" every interval).
 func (c *Checker) report(backend *url.URL, healthy bool) {
-	if changed := c.reporter.SetHealthy(backend, healthy); changed {
-		c.logger.Printf("backend %s health changed: healthy=%v", backend, healthy)
-	}
+		c.logger.Printf("healthcheck: backend %s health changed: healthy=%v", backend, healthy)
 }
