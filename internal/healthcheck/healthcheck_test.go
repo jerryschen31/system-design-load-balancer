@@ -19,9 +19,9 @@ func mustURL(t *testing.T, raw string) *url.URL {
 	return u
 }
 
-// result carries one onResult callback invocation onto a channel so tests
-// can wait for and inspect it without a data race against the callback's
-// own goroutine.
+// result carries one HealthReporter.SetHealthy invocation onto a channel so
+// tests can wait for and inspect it without a data race against the
+// reporter's own goroutine.
 type result struct {
 	backend *url.URL
 	healthy bool
@@ -53,7 +53,7 @@ func TestCheckerDetectsHealthyBackend(t *testing.T) {
 
 	backendURL := mustURL(t, backend.URL)
 	c := NewChecker([]*url.URL{backendURL}, 50*time.Millisecond, time.Second, "/health",
-		func(b *url.URL, healthy bool) { results <- result{b, healthy} }, nil)
+		HealthReporterFunc(func(b *url.URL, healthy bool) bool { results <- result{b, healthy}; return true }), nil)
 	c.Start(ctx)
 
 	got := waitForResult(t, results, 2*time.Second)
@@ -76,7 +76,7 @@ func TestCheckerDetectsUnhealthyStatus(t *testing.T) {
 
 	backendURL := mustURL(t, backend.URL)
 	c := NewChecker([]*url.URL{backendURL}, 50*time.Millisecond, time.Second, "/health",
-		func(b *url.URL, healthy bool) { results <- result{b, healthy} }, nil)
+		HealthReporterFunc(func(b *url.URL, healthy bool) bool { results <- result{b, healthy}; return true }), nil)
 	c.Start(ctx)
 
 	got := waitForResult(t, results, 2*time.Second)
@@ -103,7 +103,7 @@ func TestCheckerDetectsTimeout(t *testing.T) {
 
 	backendURL := mustURL(t, backend.URL)
 	c := NewChecker([]*url.URL{backendURL}, time.Second, checkTimeout, "/health",
-		func(b *url.URL, healthy bool) { results <- result{b, healthy} }, nil)
+		HealthReporterFunc(func(b *url.URL, healthy bool) bool { results <- result{b, healthy}; return true }), nil)
 	c.Start(ctx)
 
 	got := waitForResult(t, results, 2*time.Second)
@@ -135,7 +135,7 @@ func TestCheckerDetectsRecovery(t *testing.T) {
 
 	backendURL := mustURL(t, backend.URL)
 	c := NewChecker([]*url.URL{backendURL}, 30*time.Millisecond, time.Second, "/health",
-		func(b *url.URL, h bool) { results <- result{b, h} }, nil)
+		HealthReporterFunc(func(b *url.URL, h bool) bool { results <- result{b, h}; return true }), nil)
 	c.Start(ctx)
 
 	first := waitForResult(t, results, 2*time.Second)
@@ -173,7 +173,7 @@ func TestCheckerStopsAfterContextCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	backendURL := mustURL(t, backend.URL)
 	c := NewChecker([]*url.URL{backendURL}, interval, time.Second, "/health",
-		func(*url.URL, bool) {}, nil)
+		HealthReporterFunc(func(*url.URL, bool) bool { return false }), nil)
 	c.Start(ctx)
 
 	time.Sleep(10 * interval)
@@ -210,7 +210,7 @@ func TestNewCheckerPanicsOnNonPositiveInterval(t *testing.T) {
 		t.Logf("output: NewChecker panicked as expected: %v", r)
 	}()
 
-	NewChecker([]*url.URL{backend}, 0, time.Second, "/health", func(*url.URL, bool) {}, nil)
+	NewChecker([]*url.URL{backend}, 0, time.Second, "/health", HealthReporterFunc(func(*url.URL, bool) bool { return false }), nil)
 }
 
 func TestNewCheckerPanicsOnNonPositiveTimeout(t *testing.T) {
@@ -225,7 +225,7 @@ func TestNewCheckerPanicsOnNonPositiveTimeout(t *testing.T) {
 		t.Logf("output: NewChecker panicked as expected: %v", r)
 	}()
 
-	NewChecker([]*url.URL{backend}, time.Second, -1*time.Second, "/health", func(*url.URL, bool) {}, nil)
+	NewChecker([]*url.URL{backend}, time.Second, -1*time.Second, "/health", HealthReporterFunc(func(*url.URL, bool) bool { return false }), nil)
 }
 
 // TestNewCheckerNormalizesPathWithoutLeadingSlash proves the normalization
@@ -249,7 +249,7 @@ func TestNewCheckerNormalizesPathWithoutLeadingSlash(t *testing.T) {
 
 	backendURL := mustURL(t, backend.URL)
 	c := NewChecker([]*url.URL{backendURL}, time.Second, time.Second, "health",
-		func(b *url.URL, h bool) { results <- result{b, h} }, nil)
+		HealthReporterFunc(func(b *url.URL, h bool) bool { results <- result{b, h}; return true }), nil)
 	c.Start(ctx)
 
 	got := waitForResult(t, results, 2*time.Second)

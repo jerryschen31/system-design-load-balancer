@@ -268,8 +268,9 @@ func TestRoundRobinConcurrentSetHealthyAndNext(t *testing.T) {
 // TestRoundRobinSetHealthyReportsWhetherStateChanged locks in the changed
 // return value's contract: true only when a recognized backend's health
 // value actually differs from what was previously recorded. Callers (like
-// cmd/loadbalancer's onHealthChange wiring) use this to log state
-// transitions without re-deriving "did this change" themselves.
+// internal/healthcheck's Checker, which RoundRobin satisfies as a
+// HealthReporter) use this to log state transitions without re-deriving
+// "did this change" themselves.
 func TestRoundRobinSetHealthyReportsWhetherStateChanged(t *testing.T) {
 	a := mustURL(t, "http://backend-a")
 	stranger := mustURL(t, "http://not-a-backend")
