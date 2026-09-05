@@ -128,11 +128,8 @@ func (r *RoundRobin) Next() *url.URL {
 	return healthy[n%uint64(len(healthy))]
 }
 
-// SetHealthy records backend's current health and, if that's a change,
-// rebuilds the healthy slice that Next() reads. backend must be one of the
-// URLs originally passed to NewRoundRobin; unrecognized backends are
-// ignored, since only the health checker (which was itself constructed
-// from this balancer's backend list) is expected to call this.
+// SetHealthy records backend's current health (i.e., healthy = true or false) and, if that's a change, rebuilds the healthy slice that Next() reads. backend must be one of the
+// URLs originally passed to NewRoundRobin; unrecognized backends are ignored, since only the health checker (which was itself constructed from this balancer's backend list) is expected to call this.
 func (r *RoundRobin) SetHealthy(backend *url.URL, healthy bool) (changed bool) {
 	key := backend.String()
 

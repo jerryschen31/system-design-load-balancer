@@ -21,6 +21,7 @@ import (
 	"github.com/jerryschen31/system-design-load-balancer/internal/proxy"
 )
 
+// parses a string into a URL and validates it as a backend URL. It ensures the URL has a host and uses either the http or https scheme.
 func parseBackendURL(raw string) (*url.URL, error) {
 	target, err := url.Parse(raw)
 	if err != nil {
@@ -37,8 +38,7 @@ func parseBackendURL(raw string) (*url.URL, error) {
 	}
 }
 
-// parseBackendURLs validates every raw backend URL and preserves the order
-// they were given in -- that order is what the round-robin cycle follows.
+// parseBackendURLs validates every raw backend URL string and preserves the order they were given in -- that order is what the round-robin cycle follows.
 func parseBackendURLs(raw []string) ([]*url.URL, error) {
 	if len(raw) == 0 {
 		return nil, fmt.Errorf("at least one -backend is required")
@@ -54,12 +54,9 @@ func parseBackendURLs(raw []string) ([]*url.URL, error) {
 	return targets, nil
 }
 
-// backendFlag collects every occurrence of a repeated command-line flag.
-// flag.String and friends only keep the last value if a flag is given more
-// than once; implementing flag.Value's two methods (String, Set) instead
-// lets us register our own flag type with flag.Var, and the flag package
-// calls Set once per occurrence on the command line -- so "-backend a
-// -backend b" calls Set("a") then Set("b"), and we just append each time.
+// backendFlag defines a custom flag type that collects multiple occurrences of the -backend flag into a slice (list) of strings.
+// It implements the flag.Value interface with the String and Set methods, and is tied to the -backend command-line flag by the flag.Var(&backends,...) function call in main()
+// An interface in Go is a type defined purely as a set of method signatures — no fields, no implementation. The standard library's flag package defines an interface called flag.Value requiring exactly two methods: String() string and Set(string) error. Unlike languages where a type must explicitly declare implements SomeInterface; in Go, any type that happens to have methods matching an interface's signatures automatically satisfies (and implements) that interface — there's no keyword linking them. Here, backendFlag (just a named slice-of-strings type) gets those two methods defined on it, so it silently becomes usable anywhere a flag.Value is expected — specifically via flag.Var(&backends, "backend", ...) down in main().
 type backendFlag []string
 
 func (b *backendFlag) String() string {
@@ -75,7 +72,7 @@ func (b *backendFlag) Set(value string) error {
 func main() {
 	listenAddr := flag.String("listen", ":8080", "address for the load balancer to listen on")
 
-	// An interface in Go is a type defined purely as a set of method signatures — no fields, no implementation. The standard library's flag package defines an interface called flag.Value requiring exactly two methods: String() string and Set(string) error. Unlike languages where a type must explicitly declare implements SomeInterface, in Go, any type that happens to have methods matching an interface's signatures automatically satisfies that interface — there's no keyword linking them. Here, backendFlag (just a named slice-of-strings type) gets those two methods defined on it, so it silently becomes usable anywhere a flag.Value is expected — specifically via flag.Var(&backends, "backend", ...) down in main().
+	// define and parse flags
 	var backends backendFlag
 	flag.Var(&backends, "backend", "backend server URL to forward requests to (repeatable, e.g. -backend http://localhost:9001 -backend http://localhost:9002)")
 	healthCheckInterval := flag.Duration("health-check-interval", 5*time.Second, "how often to actively poll each backend's health check path")
@@ -92,21 +89,30 @@ func main() {
 		log.Fatalf("%v", err)
 	}
 
-	// This is the core composition. proxy.New(rr, backendTimeout, logger) returns an *httputil.ReverseProxy — a standard-library type that satisfies http.Handler (an interface requiring one method, ServeHTTP(ResponseWriter, *Request) — anything with that method can handle HTTP requests). Each middleware -- middleware.Logging(logger), middleware.MaxConcurrent(n) -- is a function of type func(http.Handler) http.Handler: it takes a handler and returns a new handler wrapping it. Chaining them like this builds up layers: middleware.Logging(logger)(middleware.MaxConcurrent(*maxConcurrent)(proxy.New(...))) means a request goes through Logging first, then MaxConcurrent, then finally the proxy. That order is deliberate, not arbitrary: Logging has to be outermost so it sees -- and logs -- every request, including the ones MaxConcurrent rejects with a 503 before they ever reach the proxy. If the order were reversed, a rejected request would never reach Logging at all, and overload events would be invisible in the logs.
+	// Logger for the load balancer. This is used to log incoming requests and to log backend interactions.
 	logger := log.New(os.Stdout, "", log.LstdFlags)
 
+	// Creates a round-robin load balancer with the parsed backend targets. This will distribute incoming requests evenly across all healthy backends.
 	rr := balancer.NewRoundRobin(targets)
+
+	// This overall HTTP handler is actually a stack / chain composed of 3 handlers: Logging handler -> MaxConcurrent handler -> Reverse Proxy handler
+	// A handler is any object/function that implements the http.Handler interface, which requires a single method: ServeHTTP(ResponseWriter, *Request). This method accepts an HTTP request and writes an HTTP response.
+	// Composes the final HTTP handler by wrapping the reverse proxy with the MaxConcurrent and Logging middlewares.
 	handler := middleware.Logging(logger)(middleware.MaxConcurrent(*maxConcurrent, *queueCapacity, *queueWaitTimeout)(proxy.New(rr, *backendTimeout, logger)))
 
+	// Creates an instance in memory of the HTTP load balancer server that listens for incoming HTTP requests at the specified address, and handles them using the composed handler.
+	// Note that this does not start the server yet; it merely prepares the server instance. The actual listening and serving happens later with server.ListenAndServe().
 	server := &http.Server{
 		Addr:    *listenAddr,
 		Handler: handler,
 	}
 
-	// healthCtx controls the health checker's polling goroutines specifically. It's cancelled on the same shutdown signal as the HTTP server below, so the checker stops polling backends rather than continuing to run after the load balancer itself has stopped accepting connections.
+	// healthCtx (healthContext) controls the health checker's polling goroutines specifically.
+	// It's cancelled on the same shutdown signal as the HTTP server below, so the checker stops polling backends rather than continuing to run after the load balancer itself has stopped accepting connections.
 	healthCtx, cancelHealth := context.WithCancel(context.Background())
 
-	// defer cancelHealth(): defer schedules a function call to run when the enclosing function (main, here) returns — regardless of how it returns (normal fall-through, or via a later return). It's a safety net: if main exits some other way than reaching line 126 normally, cancelHealth still fires and no goroutine leaks polling forever. Note it's also called explicitly at line 120 during normal shutdown — the defer is the backstop, not the primary mechanism.
+	// defer cancelHealth(): defer schedules a function call to run when the enclosing function (main, here) returns — regardless of how it returns (normal fall-through, or via a later return). It's a safety net: if main exits some other way than reaching line 126 normally, cancelHealth still fires and no goroutine leaks polling forever.
+	// Note cancelHealth can be called explicitly as well, and is in fact called explicitly at line 120 during normal shutdown — the defer is the backstop, not the primary mechanism.
 	defer cancelHealth()
 
 	// onHealthChange wraps rr.SetHealthy rather than passing it to the

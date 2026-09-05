@@ -1,5 +1,4 @@
-// Package healthcheck actively probes backends to determine whether they
-// should keep receiving traffic, independent of any real client request.
+// Package healthcheck actively probes backends to determine whether they should keep receiving traffic, independent of any real client request.
 package healthcheck
 
 import (
@@ -12,10 +11,8 @@ import (
 	"time"
 )
 
-// Checker periodically probes a fixed set of backends and reports each
-// one's health via a callback. It runs one independent polling loop per
-// backend rather than checking them one at a time in sequence, so a slow
-// or hanging backend can't delay how quickly the others get checked.
+// Checker periodically probes a fixed set of backends and reports each one's health via a callback.
+// It runs one independent polling loop per backend (separate go routines) rather than checking them one at a time in sequence, so a slow or hanging backend can't delay how quickly the others get checked.
 type Checker struct {
 	backends []*url.URL
 	interval time.Duration
@@ -26,15 +23,15 @@ type Checker struct {
 	logger   *log.Logger
 }
 
-// NewChecker builds a Checker over backends (which is not copied further --
-// callers should treat it as immutable after passing it in, same
-// expectation as balancer.NewRoundRobin). interval is how often each
-// backend is probed; timeout bounds how long a single probe is allowed to
-// take before it counts as a failure. path is the request path appended to
-// each backend's scheme+host (e.g. "/health"). onResult is called from
-// whichever backend's polling goroutine just got a result -- it must be
-// safe for concurrent use, since every backend's goroutine can call it at
-// once.
+// NewChecker constructs a new health checker for each of the given backends.
+//
+// Inputs:
+//   - backends: the list of backend URLs to be health-checked.
+//   - interval: how often each backend should be probed.
+//   - timeout: the maximum time duration to wait for a single probe response before it counts as a failure.
+//   - path: the relative health check endpoint - i.e., request path appended to each backend's scheme+host (e.g., /health)
+//   - onResult: callback function invoked once ANY backend responds with its health status (concurrency considerations must be taken into account)
+//   - logger: logger for recording health check events. If nil, logging is discarded.
 func NewChecker(backends []*url.URL, interval, timeout time.Duration, path string, onResult func(backend *url.URL, healthy bool), logger *log.Logger) *Checker {
 	if len(backends) == 0 {
 		panic("healthcheck: NewChecker requires at least one backend")
@@ -42,23 +39,14 @@ func NewChecker(backends []*url.URL, interval, timeout time.Duration, path strin
 	if onResult == nil {
 		panic("healthcheck: NewChecker requires a non-nil onResult callback")
 	}
-	// interval and timeout have no sensible default -- unlike path below,
-	// there's no single "obviously right" fallback for "how often" or
-	// "how long," so an invalid value here is a caller bug to panic on,
-	// not something to silently paper over. A non-positive interval would
-	// otherwise panic later anyway, inside time.NewTicker on whichever
-	// backend's goroutine happens to start first (Start launches one
-	// goroutine per backend), which is a much harder failure to trace
-	// back to NewChecker having been called wrong in the first place.
 	if interval <= 0 {
 		panic("healthcheck: NewChecker requires a positive interval")
 	}
 	if timeout <= 0 {
 		panic("healthcheck: NewChecker requires a positive timeout")
 	}
-	// path, unlike interval/timeout, does have an obvious correct
-	// fallback (the root path), so a missing leading slash is normalized
-	// rather than treated as a fatal caller error.
+
+	// if health endpoint relative path is missing a "/", just add it
 	if path == "" {
 		path = "/"
 	} else if !strings.HasPrefix(path, "/") {
@@ -73,19 +61,14 @@ func NewChecker(backends []*url.URL, interval, timeout time.Duration, path strin
 		timeout:  timeout,
 		path:     path,
 		onResult: onResult,
-		// A dedicated client (rather than http.DefaultClient) so this
-		// package's connection pool is independent of anything else in
-		// the process -- health-check traffic and proxied traffic don't
-		// share idle connections.
+		// Creates a dedicated client for managing health check connections. This is for isolation, so that health-check traffic and reverse-proxy traffic (from real requests to the actual load balancer) don't share the same pool of connections.
 		client: &http.Client{},
 		logger: logger,
 	}
 }
 
-// Start launches one polling goroutine per backend and returns immediately
-// -- it does not block. Each goroutine runs an initial check right away
-// (so a backend's health is known well before the first interval elapses),
-// then continues on a ticker until ctx is cancelled.
+// Start launches one polling goroutine per backend and returns immediately - it does not block.
+// Each goroutine runs an initial check right away (so a backend's health is known well before the first interval elapses), then continues on a ticker until context (ctx) is cancelled.
 func (c *Checker) Start(ctx context.Context) {
 	for _, backend := range c.backends {
 		go c.run(ctx, backend)
@@ -96,8 +79,11 @@ func (c *Checker) run(ctx context.Context, backend *url.URL) {
 	c.probe(ctx, backend)
 
 	ticker := time.NewTicker(c.interval)
+	// this makes sure the ticker is stopped when the run() function exits, preventing resource leaks.
 	defer ticker.Stop()
+	// this for loop repeats indefinitely, performing health checks at each tick until the context is cancelled (a Done signal is received)
 	for {
+		// this select waits for receiving either a cancellation signal on the Done channel of the context, or a tick timestamp from the ticker.C Channel
 		select {
 		case <-ctx.Done():
 			return
