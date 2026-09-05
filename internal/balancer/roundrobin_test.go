@@ -119,6 +119,29 @@ func TestNewRoundRobinPanicsOnNilGroup(t *testing.T) {
 	NewRoundRobin(nil)
 }
 
+// TestNewRoundRobinPanicsOnUnbuiltGroup is the fail-fast counterpart to
+// the nil check above. A zero-value &targetgroup.TargetGroup{} is non-nil,
+// so it slips past a plain nil guard, but it has no published snapshot --
+// which used to mean construction succeeded and the load balancer then
+// panicked on its first real request, on a request goroutine, pointing at
+// Next() rather than at whoever built the group.
+//
+// The panic must therefore happen here, at construction, where the stack
+// trace names the caller. Note this test asserts a *composition* property,
+// not arithmetic: the balancer's job is to surface the group's own
+// validity check early, not to re-implement it.
+func TestNewRoundRobinPanicsOnUnbuiltGroup(t *testing.T) {
+	t.Log("input: NewRoundRobin called with a non-nil but never-constructed &targetgroup.TargetGroup{}")
+	defer func() {
+		r := recover()
+		t.Logf("output: recovered panic = %v", r)
+		if r == nil {
+			t.Fatal("expected NewRoundRobin to panic at construction, rather than deferring the failure to the first request")
+		}
+	}()
+	NewRoundRobin(&targetgroup.TargetGroup{})
+}
+
 // TestRoundRobinConcurrentCallsStayBalanced fires many concurrent calls to
 // Next() from many goroutines and checks that the calls split *exactly*
 // evenly across backends. That exactness is the point: round-robin's

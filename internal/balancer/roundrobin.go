@@ -64,6 +64,21 @@ func NewRoundRobin(group *targetgroup.TargetGroup) *RoundRobin {
 	if group == nil {
 		panic("balancer: NewRoundRobin requires a non-nil target group")
 	}
+
+	// A non-nil check alone isn't enough. &targetgroup.TargetGroup{} is a
+	// legal expression in any package -- an empty composite literal is
+	// allowed even when every field is unexported -- and such a group has
+	// no published snapshot. Passing one here used to construct fine and
+	// then panic on the first request, on some request goroutine, with a
+	// stack trace pointing at Next() rather than at whoever built the
+	// group.
+	//
+	// Calling Snapshot here runs the group's own validity check at
+	// construction instead, so the failure lands at the composition root
+	// with a message that names the actual mistake. The returned value is
+	// deliberately discarded: this call is the check, not a read.
+	group.Snapshot()
+
 	return &RoundRobin{group: group}
 }
 

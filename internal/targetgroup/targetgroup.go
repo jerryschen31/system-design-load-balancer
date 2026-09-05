@@ -90,8 +90,29 @@ type Snapshot struct {
 	Generation uint64
 }
 
+// errNotBuilt is the panic message for a TargetGroup that was never
+// produced by New.
+//
+// The zero value of TargetGroup is deliberately NOT usable, and Go gives
+// no way to prevent another package from writing &TargetGroup{} -- an
+// empty composite literal is legal even when every field is unexported.
+// So the type cannot stop it being constructed; it can only make using it
+// fail immediately and legibly.
+//
+// Failing loudly matters more here than it first appears. The Snapshot
+// path would panic on its own anyway, just with a bare "invalid memory
+// address or nil pointer dereference" that says nothing about the cause.
+// The SetHealthy path is worse: reading from a nil map is legal in Go and
+// returns the zero value, so an unbuilt group would accept every health
+// report, silently discard it, and answer changed=false forever --
+// backends would never be marked down and nothing would be logged. A
+// panic naming the mistake is strictly better than either.
+const errNotBuilt = "targetgroup: TargetGroup used before construction -- build it with targetgroup.New, not a zero-value &TargetGroup{}"
+
 // TargetGroup records the health of a fixed set of backends. It is safe for
 // concurrent use by any number of goroutines.
+//
+// The zero value is not usable; use New.
 //
 // The backend set itself is fixed at construction: backends never join or
 // leave a TargetGroup, they only flip between healthy and unhealthy.
@@ -185,7 +206,18 @@ func New(backends []*url.URL) *TargetGroup {
 // the duration of a decision rather than calling Snapshot repeatedly,
 // since two separate calls can return two different generations.
 func (g *TargetGroup) Snapshot() *Snapshot {
-	return g.current.Load()
+	snap := g.current.Load()
+	if snap == nil {
+		// Only reachable on a group that never went through New,
+		// since New publishes a Snapshot before returning and
+		// SetHealthy only ever replaces one non-nil value with
+		// another. The check costs a compare-and-branch on a value
+		// already in a register -- no extra memory access -- and the
+		// branch is never taken in a correctly built program, so it
+		// does not measurably affect the read path.
+		panic(errNotBuilt)
+	}
+	return snap
 }
 
 // SetHealthy records backend's current health and, if that is an actual
@@ -206,6 +238,15 @@ func (g *TargetGroup) Snapshot() *Snapshot {
 // *TargetGroup satisfies healthcheck.HealthReporter structurally, with no
 // adapter and without either package importing the other.
 func (g *TargetGroup) SetHealthy(backend *url.URL, healthy bool) (changed bool) {
+	// Same "was this built by New?" check as Snapshot, and deliberately
+	// the same predicate rather than a nil-map test, so there is one
+	// definition of a usable group. Checking outside the lock is safe:
+	// current is atomic, and once it is non-nil it can never go back to
+	// nil, so a non-nil observation stays true forever.
+	if g.current.Load() == nil {
+		panic(errNotBuilt)
+	}
+
 	key := backend.String()
 
 	g.mu.Lock()

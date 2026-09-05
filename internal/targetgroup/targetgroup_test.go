@@ -87,6 +87,46 @@ func TestNewPanicsOnEmptyBackends(t *testing.T) {
 	New(nil)
 }
 
+// TestZeroValueTargetGroupPanicsOnUse covers the one construction path the
+// package cannot forbid: &TargetGroup{} is legal in any package, because
+// an empty composite literal is allowed even when every field is
+// unexported. Since the type can't stop such a group being built, it has
+// to make using one fail immediately and say why.
+//
+// Both entry points are covered, and the SetHealthy case is the important
+// one. Snapshot would blow up on its own regardless -- returning nil for a
+// caller to dereference -- so the guard there only improves the message.
+// SetHealthy would NOT: reading from a nil map is legal Go and yields the
+// zero value, so an unguarded unbuilt group accepts every health report,
+// discards it, and returns changed=false forever. Backends would never be
+// marked down, and nothing would be logged to say so. Converting that
+// silent failure into a panic is the actual fix.
+func TestZeroValueTargetGroupPanicsOnUse(t *testing.T) {
+	t.Run("Snapshot", func(t *testing.T) {
+		t.Log("input: Snapshot() called on a zero-value &TargetGroup{}")
+		defer func() {
+			r := recover()
+			t.Logf("output: recovered panic = %v", r)
+			if r == nil {
+				t.Fatal("expected Snapshot to panic on a group that was never built by New")
+			}
+		}()
+		(&TargetGroup{}).Snapshot()
+	})
+
+	t.Run("SetHealthy", func(t *testing.T) {
+		t.Log("input: SetHealthy() called on a zero-value &TargetGroup{}")
+		defer func() {
+			r := recover()
+			t.Logf("output: recovered panic = %v", r)
+			if r == nil {
+				t.Fatal("expected SetHealthy to panic rather than silently no-op on a nil map -- a health checker wired to such a group would discard every probe result without a word")
+			}
+		}()
+		(&TargetGroup{}).SetHealthy(mustURL(t, "http://backend-a"), false)
+	})
+}
+
 // TestSetHealthyRemovesAndRestoresBackend is the core bookkeeping
 // behaviour: a backend marked unhealthy drops out of the published
 // snapshot, and marking it healthy again puts it back -- in its original

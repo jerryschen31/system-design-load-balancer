@@ -66,6 +66,18 @@ The subtle part is that the stamp and the data must be published **together**:
 
 That is the entire reason `Snapshot` is a struct rather than two fields on `TargetGroup`. `Generation` also starts at 1, never 0, so a consumer whose cache field is still at its zero value cannot accidentally match a real generation and skip its first build.
 
+### Concept: an unusable zero value, and where to enforce it
+
+Added during PR review (see §7).
+
+- **Options considered:** (a) prevent `&TargetGroup{}` from being constructible at all; (b) tolerate it by having `Snapshot` return an empty snapshot; (c) check it at each consumer, e.g. in `NewRoundRobin`; (d) make the type itself reject it at the first use of either entry point, and have consumers trigger that check at construction.
+- **Trade-offs:** (a) is impossible in Go -- an empty composite literal is legal from any package even when every field is unexported, so a type cannot force callers through its constructor. (b) is the worst option available: an empty snapshot means "no healthy backends", so the load balancer would 502 every request forever with no indication why. (c) fixes the one call site under review while leaving every other consumer exposed, and duplicates the definition of a valid group into each of them. (d) puts one definition in one place.
+- **What we chose and why:** (d). `Snapshot` and `SetHealthy` both panic with a single shared message, and `NewRoundRobin` calls `Snapshot` at construction purely to trigger that check early.
+
+The general principle worth carrying out of this: **when a type's zero value cannot be valid, the failure belongs to the type, not to its callers.** A check written into each consumer is a rule that has to be remembered N times.
+
+Which entry point matters more is counterintuitive, and is the part worth remembering. `Snapshot` on an unbuilt group would fail loudly anyway -- returning nil for the caller to dereference -- so guarding it only improves the error message. `SetHealthy` would not fail at all: **reading from a nil map is legal in Go and returns the zero value**, so an unbuilt group accepts every health report, silently discards it, and answers `changed=false` forever. Backends never get marked down and nothing is logged. Turning a silent failure into a loud one is a real fix; improving a panic message is a nicety.
+
 ### Concept: making reads cheap by paying on writes
 
 `TargetGroup` has two very different populations of user:
@@ -176,3 +188,22 @@ New with this design, and accepted:
 - **`Generation` currently has no consumer.** It is speculative, added on the explicit judgement that one field now is cheaper than refactoring this package during phase 7. If consistent hashing ends up not needing it, it should be deleted rather than left as decoration.
 
 **Open question for phase 7:** the pull-with-a-version design means the first request after a health change pays the ring rebuild, and concurrent requests block behind it on the rebuild mutex. For a ring of ~100 backends × ~150 virtual nodes that's a sort of 15,000 elements on the request path. If that latency spike turns out to matter, the alternative is rebuilding on the health-check goroutine instead — which trades the spike for the callback-under-lock problem this design was written to avoid.
+
+## 7. PR review follow-up
+
+GitHub Copilot's automated review on PR #7 produced one finding, on `NewRoundRobin`: it guarded against a nil `*TargetGroup` but not against a non-nil zero-valued one, so `&targetgroup.TargetGroup{}` constructed fine and then panicked on the first request -- on a request goroutine, with a stack trace pointing at `Next()` rather than at whoever built the group. Given that the surrounding code's stated posture is fail-loud-at-construction, the finding was valid.
+
+Probing it before fixing turned up a second path Copilot had not flagged, and a worse one. Empirically, on a zero-value group:
+
+```
+Snapshot()   -> nil, then Next() panics: "invalid memory address or nil pointer dereference"
+SetHealthy() -> returns changed=false and does NOT panic
+```
+
+The `SetHealthy` case is the health checker's path. It doesn't crash because reading from a nil map is legal Go, so an unbuilt group would swallow every probe result in silence — no panic, no log, backends never marked down. That is exactly the class of bug this hotfix was already fixing once (the severed `report` wire), arriving by a different route.
+
+So the fix went into `internal/targetgroup` rather than only into the call site named in the review: both entry points panic with one shared `errNotBuilt` message, and `NewRoundRobin` calls `group.Snapshot()` at construction to trigger that check at the composition root. Three regression tests were added and confirmed to fail against the pre-fix source before passing against the fixed one.
+
+Because the new guard sits on the hot read path, its cost was measured rather than assumed: 39.14 ns/op with it against 38.82 ns/op without, across 10 parallel goroutines — a difference inside run-to-run noise, as expected for a compare-and-branch on a value already in a register. The benchmark was throwaway and not committed.
+
+**Method note for future phases:** the useful habit here was reproducing the reported failure first, in a throwaway test that printed what each entry point actually did, instead of going straight to the suggested patch. The report was accurate but described one symptom of a broader problem, and applying it literally would have left the silent-failure path in place. Automated review findings are evidence about where to look, not a specification of the fix.

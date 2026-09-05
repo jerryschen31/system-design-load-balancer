@@ -2,21 +2,21 @@
 
 **Source:** `hotfix/create-targetgroup`, branched from `build` at `a54b0a5`
 **Command:** `go test -v -race -count=1 ./cmd/... ./internal/...`
-**Result:** 67 passed, 0 failed, across 7 packages
+**Result:** 69 passed (plus 8 subtests), 0 failed, across 7 packages
 
 | Package | Result | Duration |
 |---|---|---|
-| `cmd/echobackend` | ok | 1.18s |
-| `cmd/loadbalancer` | ok | 2.19s |
-| `internal/balancer` | ok | 1.61s |
-| `internal/healthcheck` | ok | 2.70s |
-| `internal/middleware` | ok | 8.05s |
-| `internal/proxy` | ok | 3.20s |
-| `internal/targetgroup` | ok | 2.10s |
+| `cmd/echobackend` | ok | 1.16s |
+| `cmd/loadbalancer` | ok | 1.92s |
+| `internal/balancer` | ok | 1.60s |
+| `internal/healthcheck` | ok | 2.44s |
+| `internal/middleware` | ok | 7.86s |
+| `internal/proxy` | ok | 2.68s |
+| `internal/targetgroup` | ok | 1.97s |
 
 Scoped to `./cmd/... ./internal/...` to stay consistent with the phase 4a/4b reports. (There is no `scratch/` directory on this branch, so `./...` would have worked equally well here.)
 
-Generated on 2026-09-05 directly from the working branch.
+Generated on 2026-09-05 directly from the working branch, and regenerated the same day after PR review (see below).
 
 ## What changed
 
@@ -65,6 +65,29 @@ New with this design, and accepted:
 
 - **`Snapshot.Healthy` is a mutable slice that callers must not write to.** Go cannot express an immutable slice in the type system, and returning a defensive copy would allocate on every request — exactly the cost the atomic-pointer design exists to avoid. This is enforced by convention plus the package boundary (only `internal/targetgroup` constructs a `Snapshot`). Worth noting explicitly: **a caller writing into `Healthy` is not a data race, so `-race` will not catch it.** It is a legal write to shared memory that simply corrupts every other reader's view.
 - **Round-robin fairness across a changing healthy set remains approximate.** The counter is a source of unique increasing numbers modded against whatever the healthy list is right now, so a health flip shifts which backend a given counter value maps to. Unchanged from phase 2, and still the accepted trade-off: the goal is "skip known-dead backends," not perfect fairness across a moving set.
+
+## Updated after PR review
+
+GitHub Copilot's automated review on PR #7 raised one finding: `NewRoundRobin` guarded against a nil `*TargetGroup` but not against a non-nil zero-valued one (`&targetgroup.TargetGroup{}`), which has no published snapshot and so panicked later, on the request path, instead of failing fast at construction as the surrounding code intends.
+
+The finding is valid. Probing it also turned up a second, worse path Copilot did not mention:
+
+| Path on a zero-value `TargetGroup` | Behaviour before the fix |
+|---|---|
+| `Snapshot()`, then `Next()` | panics with a bare `invalid memory address or nil pointer dereference` -- no indication of the cause |
+| `SetHealthy()` -- the health checker's path | **returns `changed=false` and does not panic** |
+
+The second is the dangerous one: reading from a nil map is legal Go and yields the zero value, so an unbuilt group wired to a health checker would accept every probe result, discard it, and report no change forever. Backends would never be marked down, and nothing would be logged to say so. A silent failure is strictly worse than a panic.
+
+The fix was therefore made where the invariant lives rather than only at the call site named in the review. `Snapshot` and `SetHealthy` both panic with one shared message (`errNotBuilt`) naming the actual mistake, and `NewRoundRobin` calls `group.Snapshot()` at construction so the failure surfaces at the composition root with a stack trace pointing at whoever built the group -- which is what the review asked for. Note that Go cannot prevent `&TargetGroup{}` being written: an empty composite literal is legal from any package even when every field is unexported. The type can only make *using* such a value fail immediately.
+
+Three tests were added and **empirically confirmed to catch the original bug** -- run against the pre-fix source with the new tests in place, all three failed with exactly the predicted symptom (`recovered panic = <nil>`), then passed after the fix:
+
+- `TestZeroValueTargetGroupPanicsOnUse/Snapshot`
+- `TestZeroValueTargetGroupPanicsOnUse/SetHealthy`
+- `TestNewRoundRobinPanicsOnUnbuiltGroup`
+
+The guard added to `Snapshot` sits on the hot read path, so its cost was measured rather than assumed. A throwaway `BenchmarkNextParallel` (3 backends, `RunParallel` across 10 logical cores, `-benchtime 3s`) gave **39.14 ns/op with the guard against 38.82 ns/op without it** -- a 0.32 ns difference, within run-to-run noise for a contended parallel benchmark. That is expected: the check is a compare-and-branch on a pointer already loaded into a register, with no extra memory access, and the branch is never taken in a correctly built program. The ~39 ns is dominated by the atomic fetch-and-add contending across goroutines, not by the snapshot load. The benchmark was not committed.
 
 ## Full output
 
@@ -116,7 +139,7 @@ New with this design, and accepted:
     --- PASS: TestParseSleepSeconds/non-numeric_is_an_error (0.00s)
 === RUN   TestSleepHandlerRespondsAfterElapsed
     main_test.go:148: input: GET /sleep?seconds=0 -- should return 200 essentially immediately
-    main_test.go:156: output: status=200 body="slept 0s\n" elapsed=15.958µs
+    main_test.go:156: output: status=200 body="slept 0s\n" elapsed=13.708µs
 --- PASS: TestSleepHandlerRespondsAfterElapsed (0.00s)
 === RUN   TestSleepHandlerRejectsInvalidSeconds
     main_test.go:168: input: GET /sleep?seconds=nope
@@ -127,23 +150,23 @@ New with this design, and accepted:
     main_test.go:207: output: handler returned promptly on the cancellation path; body="" (empty means it never reached the normal-completion branch)
 --- PASS: TestSleepHandlerCancelledByContext (0.00s)
 PASS
-ok  	github.com/jerryschen31/system-design-load-balancer/cmd/echobackend	1.181s
+ok  	github.com/jerryschen31/system-design-load-balancer/cmd/echobackend	1.156s
 === RUN   TestIntegration_ChecksRouteAroundUnhealthyBackend
-    integration_test.go:104: input: 2 backends, one (http://127.0.0.1:49683) already unhealthy before the checker ever runs
+    integration_test.go:104: input: 2 backends, one (http://127.0.0.1:50576) already unhealthy before the checker ever runs
     integration_test.go:124: output: good backend got 30 requests, unhealthy backend got 0
 --- PASS: TestIntegration_ChecksRouteAroundUnhealthyBackend (0.11s)
 === RUN   TestStress_RecoveredBackendImmediatelyGetsFullShare
-    integration_test.go:154: input: 3 backends; backend 0 (http://127.0.0.1:49732) starts unhealthy, 1 and 2 start healthy
+    integration_test.go:154: input: 3 backends; backend 0 (http://127.0.0.1:50621) starts unhealthy, 1 and 2 start healthy
     integration_test.go:193: step: before recovery, backend 0 got 0 of 30 requests
     integration_test.go:199: step: backend 0 flipped to healthy
     integration_test.go:202: step: checker confirmed backend 0 healthy again
     integration_test.go:211: output: on the very first burst after recovery was detected, backend 0 received 30 of 90 requests (an even share is 30)
     integration_test.go:215: KNOWN WEAKNESS: a recovered backend receives its full concurrent traffic share the instant it's marked healthy, with no gradual ramp-up. A backend still warming up after recovery (cold cache, JIT warmup, reconnecting to a database) can be knocked back down immediately.
---- PASS: TestStress_RecoveredBackendImmediatelyGetsFullShare (0.11s)
+--- PASS: TestStress_RecoveredBackendImmediatelyGetsFullShare (0.17s)
 === RUN   TestStress_ConcurrentTrafficSurvivesHealthFlapping
     integration_test.go:230: input: 2 backends, one flips healthy/unhealthy every 10ms while traffic runs
     integration_test.go:288: output: status distribution across 200 requests during flapping: map[200:200]
---- PASS: TestStress_ConcurrentTrafficSurvivesHealthFlapping (0.02s)
+--- PASS: TestStress_ConcurrentTrafficSurvivesHealthFlapping (0.07s)
 === RUN   TestIntegration_MaxConcurrentProtectsFullStack
     integration_test.go:318: input: maxConcurrent=4, one backend whose handler blocks until released
     integration_test.go:350: step: 4 requests confirmed in flight at the real backend, through the full stack
@@ -152,7 +175,7 @@ ok  	github.com/jerryschen31/system-design-load-balancer/cmd/echobackend	1.181s
 --- PASS: TestIntegration_MaxConcurrentProtectsFullStack (0.00s)
 === RUN   TestIntegration_QueueAdmitsNearMissRequest
     integration_test.go:411: input: maxConcurrent=2, each holder finishes in ~150ms; queueCapacity=1, queueWaitTimeout=5s (well above holderDelay)
-    integration_test.go:453: output: near-miss request -> status=200, waited 287.927834ms (holders took 308.966792ms total)
+    integration_test.go:453: output: near-miss request -> status=200, waited 283.855959ms (holders took 304.885209ms total)
 --- PASS: TestIntegration_QueueAdmitsNearMissRequest (0.31s)
 === RUN   TestParseBackendURL
     main_test.go:6: input: backend URL http://localhost:9000
@@ -179,7 +202,7 @@ ok  	github.com/jerryschen31/system-design-load-balancer/cmd/echobackend	1.181s
     main_test.go:74: output: invalid backend URL "not-a-valid-backend": backend URL must include a host (for example http://hostname:port)
 --- PASS: TestParseBackendURLsRejectsAnyInvalidEntry (0.00s)
 PASS
-ok  	github.com/jerryschen31/system-design-load-balancer/cmd/loadbalancer	2.185s
+ok  	github.com/jerryschen31/system-design-load-balancer/cmd/loadbalancer	1.917s
 === RUN   TestRoundRobinCyclesInOrder
     roundrobin_test.go:38: input: 3 backends, calling Next() 7 times in a row
     roundrobin_test.go:44: call 0: got http://backend-a (want http://backend-a)
@@ -204,28 +227,32 @@ ok  	github.com/jerryschen31/system-design-load-balancer/cmd/loadbalancer	2.185s
     roundrobin_test.go:111: input: NewRoundRobin called with a nil target group
     roundrobin_test.go:114: output: recovered panic = balancer: NewRoundRobin requires a non-nil target group
 --- PASS: TestNewRoundRobinPanicsOnNilGroup (0.00s)
+=== RUN   TestNewRoundRobinPanicsOnUnbuiltGroup
+    roundrobin_test.go:134: input: NewRoundRobin called with a non-nil but never-constructed &targetgroup.TargetGroup{}
+    roundrobin_test.go:137: output: recovered panic = targetgroup: TargetGroup used before construction -- build it with targetgroup.New, not a zero-value &TargetGroup{}
+--- PASS: TestNewRoundRobinPanicsOnUnbuiltGroup (0.00s)
 === RUN   TestRoundRobinConcurrentCallsStayBalanced
-    roundrobin_test.go:142: input: 50 goroutines x 60 calls each = 3000 total calls across 3 backends
-    roundrobin_test.go:164: distribution: map[http://backend-a:1000 http://backend-b:1000 http://backend-c:1000]
-    roundrobin_test.go:173: output: every backend received exactly 1000 calls, confirming no update was lost across 50 concurrent goroutines
---- PASS: TestRoundRobinConcurrentCallsStayBalanced (0.00s)
+    roundrobin_test.go:165: input: 50 goroutines x 60 calls each = 3000 total calls across 3 backends
+    roundrobin_test.go:187: distribution: map[http://backend-a:1000 http://backend-b:1000 http://backend-c:1000]
+    roundrobin_test.go:196: output: every backend received exactly 1000 calls, confirming no update was lost across 50 concurrent goroutines
+--- PASS: TestRoundRobinConcurrentCallsStayBalanced (0.01s)
 === RUN   TestRoundRobinNextDuringHealthFlapping
-    roundrobin_test.go:192: input: 3 backends, health flapping on the group while 20 goroutines call Next() for 100ms
-    roundrobin_test.go:244: output: survived constant flapping without panicking; 0 calls legitimately found no healthy backend
-    roundrobin_test.go:245: output: no data race reported (run with -race to make this test meaningful)
---- PASS: TestRoundRobinNextDuringHealthFlapping (0.12s)
+    roundrobin_test.go:215: input: 3 backends, health flapping on the group while 20 goroutines call Next() for 100ms
+    roundrobin_test.go:267: output: survived constant flapping without panicking; 739584 calls legitimately found no healthy backend
+    roundrobin_test.go:268: output: no data race reported (run with -race to make this test meaningful)
+--- PASS: TestRoundRobinNextDuringHealthFlapping (0.24s)
 PASS
-ok  	github.com/jerryschen31/system-design-load-balancer/internal/balancer	1.612s
+ok  	github.com/jerryschen31/system-design-load-balancer/internal/balancer	1.597s
 === RUN   TestCheckerDetectsHealthyBackend
-    healthcheck_test.go:48: input: backend at http://127.0.0.1:49739 answers /health with 200
+    healthcheck_test.go:48: input: backend at http://127.0.0.1:50726 answers /health with 200
     healthcheck_test.go:60: output: first check reported healthy=true
 --- PASS: TestCheckerDetectsHealthyBackend (0.00s)
 === RUN   TestCheckerDetectsUnhealthyStatus
-    healthcheck_test.go:71: input: backend at http://127.0.0.1:49741 answers /health with 500
+    healthcheck_test.go:71: input: backend at http://127.0.0.1:50728 answers /health with 500
     healthcheck_test.go:83: output: first check reported healthy=false
 --- PASS: TestCheckerDetectsUnhealthyStatus (0.00s)
 === RUN   TestCheckerDetectsTimeout
-    healthcheck_test.go:98: input: backend at http://127.0.0.1:49743 sleeps 500ms before answering; checker timeout is 50ms
+    healthcheck_test.go:98: input: backend at http://127.0.0.1:50734 sleeps 500ms before answering; checker timeout is 50ms
     healthcheck_test.go:110: output: first check reported healthy=false
 --- PASS: TestCheckerDetectsTimeout (0.50s)
 === RUN   TestCheckerDetectsRecovery
@@ -251,7 +278,7 @@ ok  	github.com/jerryschen31/system-design-load-balancer/internal/balancer	1.612
     healthcheck_test.go:256: output: first check reported healthy=true
 --- PASS: TestNewCheckerNormalizesPathWithoutLeadingSlash (0.00s)
 PASS
-ok  	github.com/jerryschen31/system-design-load-balancer/internal/healthcheck	2.695s
+ok  	github.com/jerryschen31/system-design-load-balancer/internal/healthcheck	2.443s
 === RUN   TestMaxConcurrentAllowsExactlyNInFlight
     concurrency_test.go:48: input: MaxConcurrent(3, 0, 0) wrapping a handler that blocks until released
     concurrency_test.go:68: step: 3 requests confirmed in flight (holding every semaphore slot)
@@ -271,7 +298,7 @@ ok  	github.com/jerryschen31/system-design-load-balancer/internal/healthcheck	2.
 === RUN   TestLimiterReleaseGiveUpRaceDoesNotLeakSlots
     concurrency_test.go:203: input: 5000 iterations of release() raced against a waiter cancelling at the same instant
     concurrency_test.go:234: output: 5000 iterations resolved cleanly, final acquire still succeeded -- no leaked slot
---- PASS: TestLimiterReleaseGiveUpRaceDoesNotLeakSlots (5.93s)
+--- PASS: TestLimiterReleaseGiveUpRaceDoesNotLeakSlots (5.89s)
 === RUN   TestMaxConcurrentQueueAdmitsAfterWait
     concurrency_test.go:255: input: 1 slot (held), queue capacity 1, queueWaitTimeout 2s; a second request arrives while the first is in flight
     concurrency_test.go:269: step: holder confirmed in flight, holding the only slot
@@ -280,13 +307,13 @@ ok  	github.com/jerryschen31/system-design-load-balancer/internal/healthcheck	2.
 === RUN   TestMaxConcurrentQueueTimesOut
     concurrency_test.go:322: input: 1 slot held indefinitely, queueWaitTimeout=100ms, a second request that will never be released in time
     concurrency_test.go:326: step: holder confirmed in flight, holding the only slot
-    concurrency_test.go:345: output: status=503 body="timed out waiting for a free slot\n" elapsed=102.320375ms
---- PASS: TestMaxConcurrentQueueTimesOut (0.11s)
+    concurrency_test.go:345: output: status=503 body="timed out waiting for a free slot\n" elapsed=101.055625ms
+--- PASS: TestMaxConcurrentQueueTimesOut (0.10s)
 === RUN   TestMaxConcurrentQueueFullRejectsImmediately
     concurrency_test.go:379: input: 1 slot held, queue capacity 1 also held, a 3rd (overflow) request arrives
     concurrency_test.go:388: step: 1st request confirmed holding the only slot
     concurrency_test.go:402: step: 2nd request given time to join the only queue slot
-    concurrency_test.go:416: output: overflow request -> status=503 body="too many concurrent requests\n" elapsed=1.176291ms
+    concurrency_test.go:416: output: overflow request -> status=503 body="too many concurrent requests\n" elapsed=1.134167ms
 --- PASS: TestMaxConcurrentQueueFullRejectsImmediately (0.05s)
 === RUN   TestMaxConcurrentPanicsOnNonPositiveN
     concurrency_test.go:430: input: MaxConcurrent(0, 0, 0)
@@ -306,14 +333,14 @@ ok  	github.com/jerryschen31/system-design-load-balancer/internal/healthcheck	2.
     logging_test.go:24: output: request completed with status 204 and no panic
 --- PASS: TestLoggingAllowsNilLogger (0.00s)
 PASS
-ok  	github.com/jerryschen31/system-design-load-balancer/internal/middleware	8.048s
+ok  	github.com/jerryschen31/system-design-load-balancer/internal/middleware	7.860s
 === RUN   TestForwardsRequestToBackend
-    proxy_test.go:63: input: client sends POST /widgets to load balancer http://127.0.0.1:50105; backend is http://127.0.0.1:50104
+    proxy_test.go:63: input: client sends POST /widgets to load balancer http://127.0.0.1:51017; backend is http://127.0.0.1:51016
     proxy_test.go:53: backend step: received POST /widgets
     proxy_test.go:84: output: client got status 418 and body "hello from backend"
 --- PASS: TestForwardsRequestToBackend (0.00s)
 === RUN   TestClientCannotSpoofForwardedFor
-    proxy_test.go:101: input: client sends X-Forwarded-For="6.6.6.6" to http://127.0.0.1:50109
+    proxy_test.go:101: input: client sends X-Forwarded-For="6.6.6.6" to http://127.0.0.1:51022
     proxy_test.go:90: backend step: saw X-Forwarded-For="127.0.0.1"
     proxy_test.go:115: output: backend received rewritten X-Forwarded-For="127.0.0.1"
 --- PASS: TestClientCannotSpoofForwardedFor (0.00s)
@@ -323,7 +350,7 @@ ok  	github.com/jerryschen31/system-design-load-balancer/internal/middleware	8.0
     proxy_test.go:150: output: backend saw Connection="" Keep-Alive present=false
 --- PASS: TestHopByHopHeaderNotForwarded (0.00s)
 === RUN   TestBackendDownReturns502
-    proxy_test.go:158: input: backend http://127.0.0.1:1 is down; client sends GET / through load balancer http://127.0.0.1:50116
+    proxy_test.go:158: input: backend http://127.0.0.1:1 is down; client sends GET / through load balancer http://127.0.0.1:51029
     proxy_test.go:169: output: client got status 502
 --- PASS: TestBackendDownReturns502 (0.00s)
 === RUN   TestNewAllowsNilLogger
@@ -340,31 +367,31 @@ ok  	github.com/jerryschen31/system-design-load-balancer/internal/middleware	8.0
 --- PASS: TestNewPanicsOnNilBalancer (0.00s)
 === RUN   TestBackendTimeoutReturns502
     proxy_test.go:262: input: backend sleeps 500ms, proxy backendTimeout is 50ms, client has no timeout of its own
-    proxy_test.go:273: output: status=502 body="backend request timed out\n" elapsed=51.446208ms
+    proxy_test.go:273: output: status=502 body="backend request timed out\n" elapsed=51.391583ms
 --- PASS: TestBackendTimeoutReturns502 (0.50s)
 === RUN   TestBackendTimeoutAllowsSlowStreamedBodyWithinBudget
     proxy_test.go:313: input: backend streams 5 chunks, 20ms apart, total ~100ms; backendTimeout is 2s (well above that)
     proxy_test.go:326: output: status=200 body="chunk-0 chunk-1 chunk-2 chunk-3 chunk-4 "
 --- PASS: TestBackendTimeoutAllowsSlowStreamedBodyWithinBudget (0.11s)
 === RUN   TestRewriteLogsRoutingDecision
-    proxy_test.go:345: input: GET / through the load balancer, backend is http://127.0.0.1:50138
-    proxy_test.go:354: output: logged "routed GET / -> http://127.0.0.1:50138\n"
+    proxy_test.go:345: input: GET / through the load balancer, backend is http://127.0.0.1:51055
+    proxy_test.go:354: output: logged "routed GET / -> http://127.0.0.1:51055\n"
 --- PASS: TestRewriteLogsRoutingDecision (0.00s)
 === RUN   TestStress_DisabledTimeoutWaitsIndefinitely
     stress_test.go:21: input: backendTimeout=0 (disabled); backend sleeps for 300ms; client timeout is 50ms
     stress_test.go:24: backend step: request reached backend; backend is now sleeping
-    stress_test.go:44: output: client returned after 51.395917ms with error Get "http://127.0.0.1:50143/": context deadline exceeded (Client.Timeout exceeded while awaiting headers) -- opt-out confirmed working
+    stress_test.go:44: output: client returned after 51.419958ms with error Get "http://127.0.0.1:51060/": context deadline exceeded (Client.Timeout exceeded while awaiting headers) -- opt-out confirmed working
 --- PASS: TestStress_DisabledTimeoutWaitsIndefinitely (0.30s)
 === RUN   TestStress_ConcurrentRequestsHandledConcurrently
     stress_test.go:53: input: 50 concurrent requests; backend delay per request is 100ms
-    stress_test.go:96: output: burst finished in 120.256917ms (serial time would have been 5s)
+    stress_test.go:96: output: burst finished in 120.949625ms (serial time would have been 5s)
 --- PASS: TestStress_ConcurrentRequestsHandledConcurrently (0.12s)
 === RUN   TestStress_BurstAgainstUnreachableBackend
     stress_test.go:105: input: 50 concurrent requests against a load balancer whose only backend is down
     stress_test.go:133: output: every observed response was 502
 --- PASS: TestStress_BurstAgainstUnreachableBackend (0.01s)
 PASS
-ok  	github.com/jerryschen31/system-design-load-balancer/internal/proxy	3.195s
+ok  	github.com/jerryschen31/system-design-load-balancer/internal/proxy	2.678s
 === RUN   TestNewStartsAllBackendsHealthy
     targetgroup_test.go:37: input: 2 fresh backends, no SetHealthy calls yet
     targetgroup_test.go:41: output: snapshot healthy=[http://backend-a http://backend-b] generation=1
@@ -378,45 +405,55 @@ ok  	github.com/jerryschen31/system-design-load-balancer/internal/proxy	3.195s
     targetgroup_test.go:79: input: New called with an empty backend list
     targetgroup_test.go:82: output: recovered panic = targetgroup: New requires at least one backend
 --- PASS: TestNewPanicsOnEmptyBackends (0.00s)
+=== RUN   TestZeroValueTargetGroupPanicsOnUse
+=== RUN   TestZeroValueTargetGroupPanicsOnUse/Snapshot
+    targetgroup_test.go:106: input: Snapshot() called on a zero-value &TargetGroup{}
+    targetgroup_test.go:109: output: recovered panic = targetgroup: TargetGroup used before construction -- build it with targetgroup.New, not a zero-value &TargetGroup{}
+=== RUN   TestZeroValueTargetGroupPanicsOnUse/SetHealthy
+    targetgroup_test.go:118: input: SetHealthy() called on a zero-value &TargetGroup{}
+    targetgroup_test.go:121: output: recovered panic = targetgroup: TargetGroup used before construction -- build it with targetgroup.New, not a zero-value &TargetGroup{}
+--- PASS: TestZeroValueTargetGroupPanicsOnUse (0.00s)
+    --- PASS: TestZeroValueTargetGroupPanicsOnUse/Snapshot (0.00s)
+    --- PASS: TestZeroValueTargetGroupPanicsOnUse/SetHealthy (0.00s)
 === RUN   TestSetHealthyRemovesAndRestoresBackend
-    targetgroup_test.go:99: input: 3 healthy backends [http://backend-a http://backend-b http://backend-c]
-    targetgroup_test.go:103: step: SetHealthy(backend-b, false) -> healthy=[http://backend-a http://backend-c] generation=2
-    targetgroup_test.go:115: output: SetHealthy(backend-b, true) -> healthy=[http://backend-a http://backend-b http://backend-c] generation=3
+    targetgroup_test.go:139: input: 3 healthy backends [http://backend-a http://backend-b http://backend-c]
+    targetgroup_test.go:143: step: SetHealthy(backend-b, false) -> healthy=[http://backend-a http://backend-c] generation=2
+    targetgroup_test.go:155: output: SetHealthy(backend-b, true) -> healthy=[http://backend-a http://backend-b http://backend-c] generation=3
 --- PASS: TestSetHealthyRemovesAndRestoresBackend (0.00s)
 === RUN   TestSetHealthyAllUnhealthyLeavesEmptySnapshot
-    targetgroup_test.go:134: input: 2 backends, both then marked unhealthy
-    targetgroup_test.go:140: output: healthy=[] (len 0) generation=3
+    targetgroup_test.go:174: input: 2 backends, both then marked unhealthy
+    targetgroup_test.go:180: output: healthy=[] (len 0) generation=3
 --- PASS: TestSetHealthyAllUnhealthyLeavesEmptySnapshot (0.00s)
 === RUN   TestSetHealthyIgnoresUnknownBackend
-    targetgroup_test.go:153: input: group over [http://backend-a], SetHealthy called for unrelated http://not-a-backend
-    targetgroup_test.go:159: output: healthy=[http://backend-a] generation=1 (was generation=1)
+    targetgroup_test.go:193: input: group over [http://backend-a], SetHealthy called for unrelated http://not-a-backend
+    targetgroup_test.go:199: output: healthy=[http://backend-a] generation=1 (was generation=1)
 --- PASS: TestSetHealthyIgnoresUnknownBackend (0.00s)
 === RUN   TestSetHealthyReportsWhetherStateChanged
-    targetgroup_test.go:177: input: fresh group over [backend-a], which starts healthy
-    targetgroup_test.go:182: step: SetHealthy(a, true) on an already-healthy backend -> changed=false
-    targetgroup_test.go:187: step: SetHealthy(a, false) -> changed=true
-    targetgroup_test.go:192: step: SetHealthy(a, false) again -> changed=false
-    targetgroup_test.go:197: output: SetHealthy on an unrecognized backend -> changed=false
+    targetgroup_test.go:217: input: fresh group over [backend-a], which starts healthy
+    targetgroup_test.go:222: step: SetHealthy(a, true) on an already-healthy backend -> changed=false
+    targetgroup_test.go:227: step: SetHealthy(a, false) -> changed=true
+    targetgroup_test.go:232: step: SetHealthy(a, false) again -> changed=false
+    targetgroup_test.go:237: output: SetHealthy on an unrecognized backend -> changed=false
 --- PASS: TestSetHealthyReportsWhetherStateChanged (0.00s)
 === RUN   TestGenerationAdvancesOnlyOnRealChange
-    targetgroup_test.go:226: input: fresh group at generation 1
-    targetgroup_test.go:236: step: SetHealthy(a, true) -- already healthy, no-op changed=false generation 1 -> 1 (want 1)
-    targetgroup_test.go:236: step: SetHealthy(a, false) -- real flip down        changed=true  generation 1 -> 2 (want 2)
-    targetgroup_test.go:236: step: SetHealthy(a, false) -- repeat, no-op         changed=false generation 2 -> 2 (want 2)
-    targetgroup_test.go:236: step: SetHealthy(b, false) -- real flip down        changed=true  generation 2 -> 3 (want 3)
-    targetgroup_test.go:236: step: SetHealthy(a, true) -- real flip up           changed=true  generation 3 -> 4 (want 4)
-    targetgroup_test.go:246: output: generation advanced exactly once per real change, ending at 4
+    targetgroup_test.go:266: input: fresh group at generation 1
+    targetgroup_test.go:276: step: SetHealthy(a, true) -- already healthy, no-op changed=false generation 1 -> 1 (want 1)
+    targetgroup_test.go:276: step: SetHealthy(a, false) -- real flip down        changed=true  generation 1 -> 2 (want 2)
+    targetgroup_test.go:276: step: SetHealthy(a, false) -- repeat, no-op         changed=false generation 2 -> 2 (want 2)
+    targetgroup_test.go:276: step: SetHealthy(b, false) -- real flip down        changed=true  generation 2 -> 3 (want 3)
+    targetgroup_test.go:276: step: SetHealthy(a, true) -- real flip up           changed=true  generation 3 -> 4 (want 4)
+    targetgroup_test.go:286: output: generation advanced exactly once per real change, ending at 4
 --- PASS: TestGenerationAdvancesOnlyOnRealChange (0.00s)
 === RUN   TestPublishedSnapshotIsNotMutatedInPlace
-    targetgroup_test.go:265: input: a reader holds a snapshot: healthy=[http://backend-a http://backend-b http://backend-c] generation=1
-    targetgroup_test.go:269: step: SetHealthy(backend-b, false) publishes a new snapshot: healthy=[http://backend-a http://backend-c] generation=2
-    targetgroup_test.go:271: output: the held snapshot still reads healthy=[http://backend-a http://backend-b http://backend-c] generation=1
+    targetgroup_test.go:305: input: a reader holds a snapshot: healthy=[http://backend-a http://backend-b http://backend-c] generation=1
+    targetgroup_test.go:309: step: SetHealthy(backend-b, false) publishes a new snapshot: healthy=[http://backend-a http://backend-c] generation=2
+    targetgroup_test.go:311: output: the held snapshot still reads healthy=[http://backend-a http://backend-b http://backend-c] generation=1
 --- PASS: TestPublishedSnapshotIsNotMutatedInPlace (0.00s)
 === RUN   TestConcurrentSetHealthyAndSnapshot
-    targetgroup_test.go:307: input: 3 backends, concurrent SetHealthy flapping and Snapshot reads for 100ms
-    targetgroup_test.go:366: output: 277641 snapshot reads completed against constant flapping, every one internally consistent
-    targetgroup_test.go:367: output: no data race reported (run with -race to make this test meaningful)
+    targetgroup_test.go:347: input: 3 backends, concurrent SetHealthy flapping and Snapshot reads for 100ms
+    targetgroup_test.go:406: output: 249282 snapshot reads completed against constant flapping, every one internally consistent
+    targetgroup_test.go:407: output: no data race reported (run with -race to make this test meaningful)
 --- PASS: TestConcurrentSetHealthyAndSnapshot (0.10s)
 PASS
-ok  	github.com/jerryschen31/system-design-load-balancer/internal/targetgroup	2.098s
+ok  	github.com/jerryschen31/system-design-load-balancer/internal/targetgroup	1.971s
 ```
