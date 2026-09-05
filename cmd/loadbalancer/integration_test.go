@@ -1,7 +1,8 @@
 package main
 
-// These tests wire together the same three pieces main() wires together --
-// balancer.RoundRobin, healthcheck.Checker, and proxy.New -- rather than
+// These tests wire together the same pieces main() wires together --
+// targetgroup.TargetGroup, balancer.RoundRobin, healthcheck.Checker and
+// proxy.New -- rather than
 // exercising any one package in isolation. That's deliberate: the
 // interesting failure modes of active health checking only show up once a
 // real checker is actually flipping a real balancer's health state while
@@ -24,6 +25,7 @@ import (
 	"github.com/jerryschen31/system-design-load-balancer/internal/healthcheck"
 	"github.com/jerryschen31/system-design-load-balancer/internal/middleware"
 	"github.com/jerryschen31/system-design-load-balancer/internal/proxy"
+	"github.com/jerryschen31/system-design-load-balancer/internal/targetgroup"
 )
 
 func testLogger() *log.Logger {
@@ -102,12 +104,13 @@ func TestIntegration_ChecksRouteAroundUnhealthyBackend(t *testing.T) {
 	t.Logf("input: 2 backends, one (%s) already unhealthy before the checker ever runs", bad.server.URL)
 
 	backends := []*url.URL{good.url(t), bad.url(t)}
-	rr := balancer.NewRoundRobin(backends)
+	group := targetgroup.New(backends)
+	rr := balancer.NewRoundRobin(group)
 
 	const interval = 20 * time.Millisecond
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	checker := healthcheck.NewChecker(backends, interval, time.Second, "/health", rr, testLogger())
+	checker := healthcheck.NewChecker(backends, interval, time.Second, "/health", group, testLogger())
 	checker.Start(ctx)
 
 	lb := httptest.NewServer(proxy.New(rr, 0, testLogger()))
@@ -150,7 +153,8 @@ func TestStress_RecoveredBackendImmediatelyGetsFullShare(t *testing.T) {
 	recovering.healthy.Store(false)
 	t.Logf("input: 3 backends; backend 0 (%s) starts unhealthy, 1 and 2 start healthy", recovering.server.URL)
 
-	rr := balancer.NewRoundRobin(urls)
+	group := targetgroup.New(urls)
+	rr := balancer.NewRoundRobin(group)
 
 	// detected fires exactly once, the moment the checker's own callback
 	// (not a fixed sleep) confirms backend 0 has been marked healthy
@@ -159,8 +163,13 @@ func TestStress_RecoveredBackendImmediatelyGetsFullShare(t *testing.T) {
 	// mechanism (if one existed) hide behind extra elapsed time.
 	detected := make(chan struct{})
 	var once sync.Once
+	// A HealthReporterFunc wrapping the group, rather than passing the
+	// group itself: this test needs to watch probe results go by (to know
+	// the exact moment recovery is detected) while still forwarding every
+	// one of them on to the real group. This is the composition-root
+	// escape hatch the Func adapter exists for.
 	onResult := healthcheck.HealthReporterFunc(func(b *url.URL, healthy bool) bool {
-		changed := rr.SetHealthy(b, healthy)
+		changed := group.SetHealthy(b, healthy)
 		if healthy && b.String() == urls[0].String() {
 			once.Do(func() { close(detected) })
 		}
@@ -220,11 +229,12 @@ func TestStress_ConcurrentTrafficSurvivesHealthFlapping(t *testing.T) {
 	backends := []*url.URL{stable.url(t), flapping.url(t)}
 	t.Logf("input: 2 backends, one flips healthy/unhealthy every 10ms while traffic runs")
 
-	rr := balancer.NewRoundRobin(backends)
+	group := targetgroup.New(backends)
+	rr := balancer.NewRoundRobin(group)
 	const interval = 15 * time.Millisecond
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	checker := healthcheck.NewChecker(backends, interval, time.Second, "/health", rr, testLogger())
+	checker := healthcheck.NewChecker(backends, interval, time.Second, "/health", group, testLogger())
 	checker.Start(ctx)
 
 	lb := httptest.NewServer(proxy.New(rr, 0, testLogger()))
@@ -311,7 +321,7 @@ func TestIntegration_MaxConcurrentProtectsFullStack(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse backend URL: %v", err)
 	}
-	rr := balancer.NewRoundRobin([]*url.URL{target})
+	rr := balancer.NewRoundRobin(targetgroup.New([]*url.URL{target}))
 
 	// Same composition order as main(): Logging outermost, MaxConcurrent
 	// next, proxy innermost.
@@ -404,7 +414,7 @@ func TestIntegration_QueueAdmitsNearMissRequest(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse backend URL: %v", err)
 	}
-	rr := balancer.NewRoundRobin([]*url.URL{target})
+	rr := balancer.NewRoundRobin(targetgroup.New([]*url.URL{target}))
 	handler := middleware.Logging(testLogger())(middleware.MaxConcurrent(maxConcurrent, queueCapacity, queueWaitTimeout)(proxy.New(rr, 0, testLogger())))
 	lb := httptest.NewServer(handler)
 	defer lb.Close()

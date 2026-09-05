@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/jerryschen31/system-design-load-balancer/internal/balancer"
+	"github.com/jerryschen31/system-design-load-balancer/internal/targetgroup"
 )
 
 func newTestLogger() *log.Logger {
@@ -29,7 +30,7 @@ func singleBackend(t *testing.T, backendURL string) balancer.Balancer {
 	if err != nil {
 		t.Fatalf("parse backend URL: %v", err)
 	}
-	return balancer.NewRoundRobin([]*url.URL{target})
+	return balancer.NewRoundRobin(targetgroup.New([]*url.URL{target}))
 }
 
 // newProxyServer builds a proxy with no backend timeout (0 = disabled) --
@@ -195,8 +196,9 @@ func TestNoHealthyBackendsReturns502(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse backend URL: %v", err)
 	}
-	rr := balancer.NewRoundRobin([]*url.URL{target})
-	rr.SetHealthy(target, false)
+	group := targetgroup.New([]*url.URL{target})
+	rr := balancer.NewRoundRobin(group)
+	group.SetHealthy(target, false)
 	t.Logf("input: balancer's only backend (%s) marked unhealthy", target)
 
 	lb := httptest.NewServer(New(rr, 0, newTestLogger()))

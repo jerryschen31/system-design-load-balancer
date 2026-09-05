@@ -5,6 +5,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/jerryschen31/system-design-load-balancer/internal/targetgroup"
 )
 
 func mustURL(t *testing.T, raw string) *url.URL {
@@ -16,6 +18,17 @@ func mustURL(t *testing.T, raw string) *url.URL {
 	return u
 }
 
+// newRR is the common setup now that a balancer is constructed over a
+// TargetGroup rather than over a raw backend list. The group is returned
+// alongside so a test can flip health on it -- note that a test now marks
+// a backend down by talking to the *group*, never to the balancer, which
+// is the whole point of the split.
+func newRR(t *testing.T, backends ...*url.URL) (*RoundRobin, *targetgroup.TargetGroup) {
+	t.Helper()
+	g := targetgroup.New(backends)
+	return NewRoundRobin(g), g
+}
+
 func TestRoundRobinCyclesInOrder(t *testing.T) {
 	backends := []*url.URL{
 		mustURL(t, "http://backend-a"),
@@ -24,7 +37,7 @@ func TestRoundRobinCyclesInOrder(t *testing.T) {
 	}
 	t.Logf("input: %d backends, calling Next() 7 times in a row", len(backends))
 
-	rr := NewRoundRobin(backends)
+	rr, _ := newRR(t, backends...)
 	for i := 0; i < 7; i++ {
 		got := rr.Next()
 		want := backends[i%len(backends)]
@@ -36,28 +49,74 @@ func TestRoundRobinCyclesInOrder(t *testing.T) {
 	t.Log("output: cycle wrapped correctly past the end of the backend list twice")
 }
 
-// TestNewRoundRobinCopiesBackends proves NewRoundRobin isn't aliasing the
-// caller's slice: mutating the original slice after construction must not
-// change what the balancer hands out.
-func TestNewRoundRobinCopiesBackends(t *testing.T) {
-	original := []*url.URL{
-		mustURL(t, "http://backend-a"),
-		mustURL(t, "http://backend-b"),
+// TestRoundRobinSkipsUnhealthyBackend is the read-path counterpart to the
+// bookkeeping tests in internal/targetgroup. Those prove the group drops a
+// backend from its snapshot; this proves the balancer actually honours the
+// snapshot instead of caching a stale one or routing off its own list.
+// That seam -- group writes, balancer reads -- is exactly what could
+// silently break, so it gets a test on both sides.
+func TestRoundRobinSkipsUnhealthyBackend(t *testing.T) {
+	a := mustURL(t, "http://backend-a")
+	b := mustURL(t, "http://backend-b")
+	c := mustURL(t, "http://backend-c")
+	rr, group := newRR(t, a, b, c)
+	t.Log("input: 3 healthy backends, then backend-b is marked unhealthy on the group")
+
+	group.SetHealthy(b, false)
+
+	for i := 0; i < 6; i++ {
+		got := rr.Next()
+		if got.String() == b.String() {
+			t.Fatalf("call %d: got %s, which was marked unhealthy and should have been skipped", i, got)
+		}
 	}
-	t.Logf("input: construct RoundRobin over %v, then mutate the original slice", original)
+	t.Log("output: 6 calls to Next() never returned the unhealthy backend")
 
-	rr := NewRoundRobin(original)
+	group.SetHealthy(b, true)
+	seen := make(map[string]bool)
+	for i := 0; i < 6; i++ {
+		seen[rr.Next().String()] = true
+	}
+	t.Logf("step: backend-b marked healthy again; backends reached: %v", seen)
+	if !seen[b.String()] {
+		t.Fatal("backend-b was marked healthy again but Next() never returned it")
+	}
+}
 
-	// Mutate the caller's slice after handing it to NewRoundRobin -- this
-	// simulates a caller reusing or reordering its own backend list later.
-	original[0] = mustURL(t, "http://attacker-controlled")
-	t.Logf("step: caller's original slice[0] is now %s", original[0])
+// TestRoundRobinAllUnhealthyReturnsNil proves the balancer fails loud
+// (nil, for the proxy to turn into a 502) rather than silently routing to
+// a backend it knows is down. The group reports an empty healthy list;
+// turning that into "no target" is the balancer's decision, which is why
+// this test lives here and not in internal/targetgroup.
+func TestRoundRobinAllUnhealthyReturnsNil(t *testing.T) {
+	a := mustURL(t, "http://backend-a")
+	b := mustURL(t, "http://backend-b")
+	rr, group := newRR(t, a, b)
+	t.Log("input: 2 backends, both marked unhealthy on the group")
+
+	group.SetHealthy(a, false)
+	group.SetHealthy(b, false)
 
 	got := rr.Next()
-	t.Logf("output: rr.Next() returned %s", got)
-	if got.String() != "http://backend-a" {
-		t.Fatalf("got %s, want http://backend-a -- NewRoundRobin must not alias the caller's slice", got)
+	t.Logf("output: Next() returned %v", got)
+	if got != nil {
+		t.Fatalf("got %s, want nil -- no backend is healthy", got)
 	}
+}
+
+// TestNewRoundRobinPanicsOnNilGroup keeps the failure at construction,
+// where the stack trace points at the composition root, rather than as a
+// nil dereference on some request goroutine much later.
+func TestNewRoundRobinPanicsOnNilGroup(t *testing.T) {
+	t.Log("input: NewRoundRobin called with a nil target group")
+	defer func() {
+		r := recover()
+		t.Logf("output: recovered panic = %v", r)
+		if r == nil {
+			t.Fatal("expected NewRoundRobin to panic on a nil target group")
+		}
+	}()
+	NewRoundRobin(nil)
 }
 
 // TestRoundRobinConcurrentCallsStayBalanced fires many concurrent calls to
@@ -82,7 +141,7 @@ func TestRoundRobinConcurrentCallsStayBalanced(t *testing.T) {
 	total := goroutines * callsPerGoroutine
 	t.Logf("input: %d goroutines x %d calls each = %d total calls across %d backends", goroutines, callsPerGoroutine, total, len(backends))
 
-	rr := NewRoundRobin(backends)
+	rr, _ := newRR(t, backends...)
 	results := make(chan string, total)
 
 	var wg sync.WaitGroup
@@ -114,118 +173,27 @@ func TestRoundRobinConcurrentCallsStayBalanced(t *testing.T) {
 	t.Logf("output: every backend received exactly %d calls, confirming no update was lost across %d concurrent goroutines", want, goroutines)
 }
 
-// TestNewRoundRobinStartsAllBackendsHealthy confirms the optimistic-start
-// default: every backend is eligible to receive traffic immediately, before
-// any health check has run against it.
-func TestNewRoundRobinStartsAllBackendsHealthy(t *testing.T) {
-	backends := []*url.URL{
-		mustURL(t, "http://backend-a"),
-		mustURL(t, "http://backend-b"),
-	}
-	t.Logf("input: %d fresh backends, no SetHealthy calls yet", len(backends))
-
-	rr := NewRoundRobin(backends)
-	seen := make(map[string]bool)
-	for i := 0; i < 4; i++ {
-		seen[rr.Next().String()] = true
-	}
-	t.Logf("output: backends reached by Next(): %v", seen)
-	for _, b := range backends {
-		if !seen[b.String()] {
-			t.Fatalf("backend %s never received a call -- it should have started healthy", b)
-		}
-	}
-}
-
-// TestRoundRobinSkipsUnhealthyBackend proves SetHealthy actually changes
-// routing: once a backend is marked unhealthy, Next() must stop returning
-// it, and cycle only over the remaining healthy ones.
-func TestRoundRobinSkipsUnhealthyBackend(t *testing.T) {
-	a := mustURL(t, "http://backend-a")
-	b := mustURL(t, "http://backend-b")
-	c := mustURL(t, "http://backend-c")
-	rr := NewRoundRobin([]*url.URL{a, b, c})
-	t.Log("input: 3 healthy backends, then backend-b is marked unhealthy")
-
-	rr.SetHealthy(b, false)
-
-	for i := 0; i < 6; i++ {
-		got := rr.Next()
-		if got.String() == b.String() {
-			t.Fatalf("call %d: got %s, which was marked unhealthy and should have been skipped", i, got)
-		}
-	}
-	t.Log("output: 6 calls to Next() never returned the unhealthy backend")
-
-	rr.SetHealthy(b, true)
-	seen := make(map[string]bool)
-	for i := 0; i < 6; i++ {
-		seen[rr.Next().String()] = true
-	}
-	t.Logf("step: backend-b marked healthy again; backends reached: %v", seen)
-	if !seen[b.String()] {
-		t.Fatal("backend-b was marked healthy again but Next() never returned it")
-	}
-}
-
-// TestRoundRobinAllUnhealthyReturnsNil proves the balancer fails loud
-// (nil, for the proxy to turn into a 502) rather than silently routing to
-// a backend it knows is down.
-func TestRoundRobinAllUnhealthyReturnsNil(t *testing.T) {
-	a := mustURL(t, "http://backend-a")
-	b := mustURL(t, "http://backend-b")
-	rr := NewRoundRobin([]*url.URL{a, b})
-	t.Log("input: 2 backends, both marked unhealthy")
-
-	rr.SetHealthy(a, false)
-	rr.SetHealthy(b, false)
-
-	got := rr.Next()
-	t.Logf("output: Next() returned %v", got)
-	if got != nil {
-		t.Fatalf("got %s, want nil -- no backend is healthy", got)
-	}
-}
-
-// TestRoundRobinSetHealthyIgnoresUnknownBackend confirms SetHealthy is a
-// no-op for a URL that isn't one of this balancer's own backends, rather
-// than silently growing the backend set.
-func TestRoundRobinSetHealthyIgnoresUnknownBackend(t *testing.T) {
-	a := mustURL(t, "http://backend-a")
-	stranger := mustURL(t, "http://not-a-backend")
-	rr := NewRoundRobin([]*url.URL{a})
-	t.Logf("input: balancer over [%s], SetHealthy called for unrelated %s", a, stranger)
-
-	rr.SetHealthy(stranger, false)
-
-	got := rr.Next()
-	t.Logf("output: Next() returned %s", got)
-	if got.String() != a.String() {
-		t.Fatalf("got %s, want %s -- an unrecognized backend must not affect routing", got, a)
-	}
-}
-
-// TestRoundRobinConcurrentSetHealthyAndNext runs SetHealthy from many
-// goroutines (simulating several backends' health-check loops reporting at
-// once) concurrently with many Next() calls (simulating in-flight
-// requests). It doesn't assert a specific distribution -- the health state
-// is changing throughout -- it exists to be run under `go test -race`,
-// which is the actual check: SetHealthy's map + atomic.Pointer swap must
-// be race-free under concurrent writers, and Next() must never observe a
-// half-updated healthy slice.
-func TestRoundRobinConcurrentSetHealthyAndNext(t *testing.T) {
+// TestRoundRobinNextDuringHealthFlapping is the adversarial version of the
+// read path: health flips constantly while requests are being routed.
+//
+// The specific failure it hunts for is an index-out-of-range panic. Next()
+// reads a length and then indexes with it; if it read the healthy list
+// twice -- once for len(), once for the index -- a health check landing
+// between those two reads could shrink the list and the index would run
+// off the end. Loading one Snapshot and reusing it is what prevents that,
+// and this test is what would catch a future edit that breaks it.
+func TestRoundRobinNextDuringHealthFlapping(t *testing.T) {
 	backends := []*url.URL{
 		mustURL(t, "http://backend-a"),
 		mustURL(t, "http://backend-b"),
 		mustURL(t, "http://backend-c"),
 	}
-	rr := NewRoundRobin(backends)
-	t.Logf("input: %d backends, concurrent SetHealthy flapping and Next() calls for 100ms", len(backends))
+	rr, group := newRR(t, backends...)
+	t.Logf("input: %d backends, health flapping on the group while 20 goroutines call Next() for 100ms", len(backends))
 
 	stop := make(chan struct{})
 	var wg sync.WaitGroup
 
-	// One flapping goroutine per backend, toggling its health repeatedly.
 	for _, b := range backends {
 		wg.Add(1)
 		go func(b *url.URL) {
@@ -236,24 +204,35 @@ func TestRoundRobinConcurrentSetHealthyAndNext(t *testing.T) {
 				case <-stop:
 					return
 				default:
-					rr.SetHealthy(b, healthy)
+					group.SetHealthy(b, healthy)
 					healthy = !healthy
 				}
 			}
 		}(b)
 	}
 
-	// Many goroutines hammering Next() concurrently with the flapping above.
+	var nilResults, mu = 0, sync.Mutex{}
 	for g := 0; g < 20; g++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			localNil := 0
 			for {
 				select {
 				case <-stop:
+					mu.Lock()
+					nilResults += localNil
+					mu.Unlock()
 					return
 				default:
-					rr.Next() // return value intentionally unchecked: nil is valid if all 3 happen to be unhealthy at this instant
+					// nil is a legitimate result here: at this
+					// instant all three backends may be flapped
+					// down at once. The assertion is simply that
+					// this never panics and never returns a
+					// backend outside the group.
+					if got := rr.Next(); got == nil {
+						localNil++
+					}
 				}
 			}
 		}()
@@ -262,38 +241,6 @@ func TestRoundRobinConcurrentSetHealthyAndNext(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 	close(stop)
 	wg.Wait()
+	t.Logf("output: survived constant flapping without panicking; %d calls legitimately found no healthy backend", nilResults)
 	t.Log("output: no data race reported (run with -race to make this test meaningful)")
-}
-
-// TestRoundRobinSetHealthyReportsWhetherStateChanged locks in the changed
-// return value's contract: true only when a recognized backend's health
-// value actually differs from what was previously recorded. Callers (like
-// internal/healthcheck's Checker, which RoundRobin satisfies as a
-// HealthReporter) use this to log state transitions without re-deriving
-// "did this change" themselves.
-func TestRoundRobinSetHealthyReportsWhetherStateChanged(t *testing.T) {
-	a := mustURL(t, "http://backend-a")
-	stranger := mustURL(t, "http://not-a-backend")
-	rr := NewRoundRobin([]*url.URL{a})
-	t.Log("input: fresh balancer over [backend-a], which starts healthy")
-
-	if changed := rr.SetHealthy(a, true); changed {
-		t.Error("got changed=true for a no-op (already healthy) call, want false")
-	}
-	t.Log("step: SetHealthy(a, true) on an already-healthy backend -> changed=false")
-
-	if changed := rr.SetHealthy(a, false); !changed {
-		t.Error("got changed=false for an actual flip healthy->unhealthy, want true")
-	}
-	t.Log("step: SetHealthy(a, false) -> changed=true")
-
-	if changed := rr.SetHealthy(a, false); changed {
-		t.Error("got changed=true for a repeated identical call, want false")
-	}
-	t.Log("step: SetHealthy(a, false) again -> changed=false")
-
-	if changed := rr.SetHealthy(stranger, false); changed {
-		t.Error("got changed=true for an unrecognized backend, want false")
-	}
-	t.Log("output: SetHealthy on an unrecognized backend -> changed=false")
 }

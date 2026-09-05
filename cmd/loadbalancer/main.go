@@ -19,6 +19,7 @@ import (
 	"github.com/jerryschen31/system-design-load-balancer/internal/healthcheck"
 	"github.com/jerryschen31/system-design-load-balancer/internal/middleware"
 	"github.com/jerryschen31/system-design-load-balancer/internal/proxy"
+	"github.com/jerryschen31/system-design-load-balancer/internal/targetgroup"
 )
 
 // parses a string into a URL and validates it as a backend URL. It ensures the URL has a host and uses either the http or https scheme.
@@ -92,8 +93,15 @@ func main() {
 	// Logger for the load balancer. This is used to log incoming requests and to log backend interactions.
 	logger := log.New(os.Stdout, "", log.LstdFlags)
 
-	// Creates a round-robin load balancer with the parsed backend targets. This will distribute incoming requests evenly across all healthy backends.
-	rr := balancer.NewRoundRobin(targets)
+	// The target group is the single source of truth for which backends are currently able to receive traffic.
+	// It is deliberately created here, at the composition root, rather than inside either of the two components that use it,
+	// because it is the one piece of state they share: the health checker writes to it, the balancer reads from it,
+	// and neither one holds a reference to the other. Wiring them together is main's job, not theirs.
+	group := targetgroup.New(targets)
+
+	// Creates a round-robin load balancer over the target group. It contributes only the "whose turn is it" decision --
+	// which backends are eligible at all is whatever the group currently says.
+	rr := balancer.NewRoundRobin(group)
 
 	// This overall HTTP handler is actually a stack / chain composed of 3 handlers: Logging handler -> MaxConcurrent handler -> Reverse Proxy handler
 	// A handler is any object/function that implements the http.Handler interface, which requires a single method: ServeHTTP(ResponseWriter, *Request). This method accepts an HTTP request and writes an HTTP response.
@@ -115,14 +123,15 @@ func main() {
 	// Note cancelHealth can be called explicitly as well, and is in fact called explicitly at line 120 during normal shutdown — the defer is the backstop, not the primary mechanism.
 	defer cancelHealth()
 
-	// rr is passed directly as the health checker's reporter: RoundRobin's
-	// SetHealthy method already matches the healthcheck.HealthReporter
-	// interface, so no adapter is needed here. healthcheck logs the health
-	// transition itself (using the "changed" bool SetHealthy returns),
-	// consistent with the other health-check events it already logs
-	// (probe errors, non-2xx statuses) -- there's no longer any
-	// health-check-specific wiring left to do at the composition root.
-	checker := healthcheck.NewChecker(targets, *healthCheckInterval, *healthCheckTimeout, *healthCheckPath, rr, logger)
+	// The target group is passed as the health checker's reporter: TargetGroup's SetHealthy method
+	// matches the healthcheck.HealthReporter interface, so no adapter is needed here.
+	//
+	// Note what is NOT passed: the checker never sees the balancer, and the balancer never sees the checker.
+	// Probe results go into the group, routing decisions come out of it, and swapping round-robin for a
+	// different algorithm later changes nothing about health checking. healthcheck logs the health transition
+	// itself (using the "changed" bool SetHealthy returns), consistent with the other health-check events it
+	// already logs (probe errors, non-2xx statuses).
+	checker := healthcheck.NewChecker(targets, *healthCheckInterval, *healthCheckTimeout, *healthCheckPath, group, logger)
 	checker.Start(healthCtx)
 
 	// go func() { ... }(): launches a goroutine — a lightweight, independently-scheduled function execution managed by the Go runtime
