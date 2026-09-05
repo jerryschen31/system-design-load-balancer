@@ -53,7 +53,7 @@ func TestCheckerDetectsHealthyBackend(t *testing.T) {
 
 	backendURL := mustURL(t, backend.URL)
 	c := NewChecker([]*url.URL{backendURL}, 50*time.Millisecond, time.Second, "/health",
-		HealthReporterFunc(func(b *url.URL, healthy bool) bool { results <- result{b, healthy}; return true }), nil)
+		HealthReporterFunc(func(b *url.URL, healthy bool) bool { results <- result{b, healthy}; return false }), nil)
 	c.Start(ctx)
 
 	got := waitForResult(t, results, 2*time.Second)
