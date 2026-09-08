@@ -1,9 +1,9 @@
 # system-design-load-balancer
 Building a Load Balancer to learn about System Design
 
-I'm an old-school computer engineering major from Caltech over 20 years ago, and I've been a computational biologist by trade ever since. My work has involved running bioinformatics pipelines on AWS, and providing a simple frontend for end-users to run these pipelines.
+I'm an old-school computer engineering major from Caltech over 20 years ago, and I've been a bioinformatics scientist by trade ever since. My work has involved genome sequencing processing and analysis, and running bioinformatics pipelines at-scale.
 
-I caught the AI bug, and want to get into developing AI agents and building AI infrastructure for the 2nd half of my career.
+Recently I caught the AI bug, and decided to devote the 2nd half of my career to developing AI agents and building AI agent infrastructure.
 
 Inevitably, for any engineering position I will be tested on my System Design skills. I am preparing for System Design interview questions by starting with teh fundamentals and working my way up.
 
