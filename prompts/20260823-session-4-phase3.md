@@ -5,7 +5,7 @@
 │                      ▗ ▗   ▖ ▖                     │ ─────────────────────── │
 │                                                    │ What's new              │
 │                        ▘▘ ▝▝                       │ Cost estimates (`/cost… │
-│   Sonnet 5 · Claude Pro · jerryschen@gmail.com's   │ Added the one-time ful… │
+│   Sonnet 5 · Claude Pro · [redacted]'s   │ Added the one-time ful… │
 │   Organization                                     │ Added `/claude-api upg… │
 │       ~/gh/public/system-design-load-balancer      │ /release-notes for more │
 ╰──────────────────────────────────────────────────────────────────────────────╯
@@ -1310,7 +1310,7 @@
 ✻ Crunched for 37s
 
 ❯ /export prompts/20260823-session-1-phase-3.md                                 
-  ⎿  Conversation exported to: /Users/jerry/gh/public/system-design-load-balance
+  ⎿  Conversation exported to: ~/gh/public/system-design-load-balance
      r/prompts/20260823-session-1-phase-3.md
 
 ❯ /ship-phase proceed with committing, pushing and creating PR for merging back 
@@ -1332,7 +1332,7 @@ code in the PR
 
 ⏺ Before staging, one thing from the sanity check needs your call: the newly
   exported transcript prompts/20260823-session-1-phase-3.md (line 8) contains
-  your email jerryschen@gmail.com in the CLI banner line — the same pattern
+  your email [redacted] in the CLI banner line — the same pattern
   every prior export has. Looking at git history, this has been handled
   inconsistently: it's raw/unredacted in 3 of the 5 previously committed prompt
   files, but shows as [redacted] in 2 of them (20260821-session-2-phase-1.md,
@@ -1352,7 +1352,7 @@ code in the PR
           ew              │
        7  │                        ▘▘ ▝▝                       │ Cost est
           imates (`/cost… │
-       8 -│   Sonnet 5 · Claude Pro · jerryschen@gmail.com's   │ Added th
+       8 -│   Sonnet 5 · Claude Pro · [redacted]'s   │ Added th
          -e one-time ful… │                                              
        8 +│   Sonnet 5 · Claude Pro · [redacted]'s   │ Added the one-time
          + ful… │                                                        

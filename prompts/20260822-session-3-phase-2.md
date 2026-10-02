@@ -5,7 +5,7 @@
 │                      ▗ ▗   ▖ ▖                     │ ─────────────────────── │
 │                                                    │ What's new              │
 │                        ▘▘ ▝▝                       │ Cost estimates (`/cost… │
-│   Sonnet 5 · Claude Pro · jerryschen@gmail.com's   │ Added the one-time ful… │
+│   Sonnet 5 · Claude Pro · [redacted]'s   │ Added the one-time ful… │
 │   Organization                                     │ Added `/claude-api upg… │
 │       ~/gh/public/system-design-load-balancer      │ /release-notes for more │
 ╰──────────────────────────────────────────────────────────────────────────────╯
@@ -17,7 +17,7 @@
   localhost:9001. Here's the first few lines of the tcpdump, let me see if I    
   understand correctly                                                          
                                                                                 
-  jerry@Jerrys-MacBook-Air-2 system-design-load-balancer % sudo tcpdump -i lo0  
+  user@host system-design-load-balancer % sudo tcpdump -i lo0  
   -n port 9001                                                                  
   Password:                                                                     
   tcpdump: verbose output suppressed, use -v[v]... for full protocol decode     

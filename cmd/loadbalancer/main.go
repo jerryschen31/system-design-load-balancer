@@ -93,10 +93,8 @@ func main() {
 	// Logger for the load balancer. This is used to log incoming requests and to log backend interactions.
 	logger := log.New(os.Stdout, "", log.LstdFlags)
 
-	// The target group is the single source of truth for which backends are currently able to receive traffic.
-	// It is deliberately created here, at the composition root, rather than inside either of the two components that use it,
-	// because it is the one piece of state they share: the health checker writes to it, the balancer reads from it,
-	// and neither one holds a reference to the other. Wiring them together is main's job, not theirs.
+	// TargetGroup contains the list of backend servers and their health status (healthy or unhealthy). It is used by the load balancer to determine which backends are eligible to receive traffic.
+	// Health status is updated by the health checker component (healthchecker.go), which periodically probes each backend to determine its availability.
 	group := targetgroup.New(targets)
 
 	// Creates a round-robin load balancer over the target group. It contributes only the "whose turn is it" decision --
@@ -123,14 +121,8 @@ func main() {
 	// Note cancelHealth can be called explicitly as well, and is in fact called explicitly at line 120 during normal shutdown — the defer is the backstop, not the primary mechanism.
 	defer cancelHealth()
 
-	// The target group is passed as the health checker's reporter: TargetGroup's SetHealthy method
-	// matches the healthcheck.HealthReporter interface, so no adapter is needed here.
-	//
-	// Note what is NOT passed: the checker never sees the balancer, and the balancer never sees the checker.
-	// Probe results go into the group, routing decisions come out of it, and swapping round-robin for a
-	// different algorithm later changes nothing about health checking. healthcheck logs the health transition
-	// itself (using the "changed" bool SetHealthy returns), consistent with the other health-check events it
-	// already logs (probe errors, non-2xx statuses).
+	// Create and start the health checker, which will periodically probe each backend in the target group (group)
+	// The checker runs in its own goroutine and stops when healthCtx is cancelled.
 	checker := healthcheck.NewChecker(targets, *healthCheckInterval, *healthCheckTimeout, *healthCheckPath, group, logger)
 	checker.Start(healthCtx)
 

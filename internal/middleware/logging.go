@@ -11,9 +11,7 @@ import (
 	"time"
 )
 
-// statusRecorder wraps http.ResponseWriter to capture the status code
-// written by the inner handler, since the standard interface has no way
-// to read it back afterward.
+// statusRecorder wraps http.ResponseWriter to capture the status code written by the inner handler, since the standard interface has no way to read it back afterward.
 type statusRecorder struct {
 	http.ResponseWriter
 	status int

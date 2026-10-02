@@ -5,7 +5,7 @@
 │                      ▗ ▗   ▖ ▖                     │ Cost estimates (`/cost… │
 │                                                    │ /release-notes for more │
 │                        ▘▘ ▝▝                       │                         │
-│   Sonnet 5 · Claude Pro · jerryschen@gmail.com's   │                         │
+│   Sonnet 5 · Claude Pro · [redacted]'s   │                         │
 │   Organization                                     │                         │
 │       ~/gh/public/system-design-load-balancer      │                         │
 ╰──────────────────────────────────────────────────────────────────────────────╯

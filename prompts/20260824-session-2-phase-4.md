@@ -5,7 +5,7 @@
 │                      ▗ ▗   ▖ ▖                     │ ─────────────────────── │
 │                                                    │ What's new              │
 │                        ▘▘ ▝▝                       │ Cost estimates (`/cost… │
-│   Sonnet 5 · Claude Pro · jerryschen@gmail.com's   │ Added the one-time ful… │
+│   Sonnet 5 · Claude Pro · [redacted]'s   │ Added the one-time ful… │
 │   Organization                                     │ Added `/claude-api upg… │
 │       ~/gh/public/system-design-load-balancer      │ /release-notes for more │
 ╰──────────────────────────────────────────────────────────────────────────────╯
@@ -4002,7 +4002,7 @@
 ✻ Sautéed for 1m 33s
 
 ❯ /export prompts/20260824-session-1-phase-4.md                                 
-  ⎿  Conversation exported to: /Users/jerry/gh/public/system-design-load-balance
+  ⎿  Conversation exported to: ~/gh/public/system-design-load-balance
      r/prompts/20260824-session-1-phase-4.md
 
 ❯ /ship-phase proceed with committing, redacting / hiding any credentials or    
@@ -4042,7 +4042,7 @@ email addresses, and opening a PR to build
           ew              │
        7  │                        ▘▘ ▝▝                       │ Cost est
           imates (`/cost… │
-       8 -│   Sonnet 5 · Claude Pro · jerryschen@gmail.com's   │ Added th
+       8 -│   Sonnet 5 · Claude Pro · [redacted]'s   │ Added th
          -e one-time ful… │                                              
        8 +│   Sonnet 5 · Claude Pro · [redacted]'s   │ Added the one-time
          + ful… │                                                        

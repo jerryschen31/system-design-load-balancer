@@ -5,7 +5,7 @@
 │                      ▗ ▗   ▖ ▖                     │ ─────────────────────── │
 │                                                    │ What's new              │
 │                        ▘▘ ▝▝                       │ Cost estimates (`/cost… │
-│   Sonnet 5 · Claude Pro · jerryschen@gmail.com's   │ Added the one-time ful… │
+│   Sonnet 5 · Claude Pro · [redacted]'s   │ Added the one-time ful… │
 │   Organization                                     │ Added `/claude-api upg… │
 │       ~/gh/public/system-design-load-balancer      │ /release-notes for more │
 ╰──────────────────────────────────────────────────────────────────────────────╯
