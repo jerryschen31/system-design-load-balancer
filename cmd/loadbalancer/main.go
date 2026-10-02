@@ -1,0 +1,166 @@
+// Command loadbalancer runs the reverse proxy.
+package main
+
+import (
+	"context"
+	"errors"
+	"flag"
+	"fmt"
+	"log"
+	"net/http"
+	"net/url"
+	"os"
+	"os/signal"
+	"strings"
+	"syscall"
+	"time"
+
+	"github.com/jerryschen31/system-design-load-balancer/internal/balancer"
+	"github.com/jerryschen31/system-design-load-balancer/internal/healthcheck"
+	"github.com/jerryschen31/system-design-load-balancer/internal/middleware"
+	"github.com/jerryschen31/system-design-load-balancer/internal/proxy"
+	"github.com/jerryschen31/system-design-load-balancer/internal/targetgroup"
+)
+
+// parses a string into a URL and validates it as a backend URL. It ensures the URL has a host and uses either the http or https scheme.
+func parseBackendURL(raw string) (*url.URL, error) {
+	target, err := url.Parse(raw)
+	if err != nil {
+		return nil, fmt.Errorf("parse backend URL: %w", err)
+	}
+	if target.Host == "" {
+		return nil, fmt.Errorf("backend URL must include a host (for example http://hostname:port)")
+	}
+	switch strings.ToLower(target.Scheme) {
+	case "http", "https":
+		return target, nil
+	default:
+		return nil, fmt.Errorf("backend URL scheme must be http or https")
+	}
+}
+
+// parseBackendURLs validates every raw backend URL string and preserves the order they were given in -- that order is what the round-robin cycle follows.
+func parseBackendURLs(raw []string) ([]*url.URL, error) {
+	if len(raw) == 0 {
+		return nil, fmt.Errorf("at least one -backend is required")
+	}
+	targets := make([]*url.URL, 0, len(raw))
+	for _, r := range raw {
+		target, err := parseBackendURL(r)
+		if err != nil {
+			return nil, fmt.Errorf("invalid backend URL %q: %w", r, err)
+		}
+		targets = append(targets, target)
+	}
+	return targets, nil
+}
+
+// backendFlag defines a custom flag type that collects multiple occurrences of the -backend flag into a slice (list) of strings.
+// It implements the flag.Value interface with the String and Set methods, and is tied to the -backend command-line flag by the flag.Var(&backends,...) function call in main()
+// An interface in Go is a type defined purely as a set of method signatures — no fields, no implementation. The standard library's flag package defines an interface called flag.Value requiring exactly two methods: String() string and Set(string) error. Unlike languages where a type must explicitly declare implements SomeInterface; in Go, any type that happens to have methods matching an interface's signatures automatically satisfies (and implements) that interface — there's no keyword linking them. Here, backendFlag (just a named slice-of-strings type) gets those two methods defined on it, so it silently becomes usable anywhere a flag.Value is expected — specifically via flag.Var(&backends, "backend", ...) down in main().
+type backendFlag []string
+
+func (b *backendFlag) String() string {
+	return strings.Join(*b, ",")
+}
+
+func (b *backendFlag) Set(value string) error {
+	*b = append(*b, value)
+	return nil
+}
+
+// package main: in Go, every file belongs to a package (a namespace/compilation unit). A package literally named main, containing a function literally named main(), is what tells the Go compiler "this produces an executable binary," not a library. Everything under internal/ is a library package (balancer, healthcheck, etc.) — importable within this module, but internal/ is a special directory name the compiler enforces: nothing outside this module can import them at all.
+func main() {
+	listenAddr := flag.String("listen", ":8080", "address for the load balancer to listen on")
+
+	// define and parse flags
+	var backends backendFlag
+	flag.Var(&backends, "backend", "backend server URL to forward requests to (repeatable, e.g. -backend http://localhost:9001 -backend http://localhost:9002)")
+	healthCheckInterval := flag.Duration("health-check-interval", 5*time.Second, "how often to actively poll each backend's health check path")
+	healthCheckTimeout := flag.Duration("health-check-timeout", 2*time.Second, "how long a single health check probe may take before it counts as a failure")
+	healthCheckPath := flag.String("health-check-path", "/health", "path to request on each backend for health checks")
+	backendTimeout := flag.Duration("backend-timeout", 10*time.Second, "max time to wait on a single backend request (headers + full body); 0 disables the timeout and waits indefinitely")
+	maxConcurrent := flag.Int("max-concurrent", 100, "max number of requests the load balancer will process at once")
+	queueCapacity := flag.Int("queue-capacity", 20, "max number of requests allowed to wait for a free slot once max-concurrent is reached; 0 disables queueing (immediate 503 instead)")
+	queueWaitTimeout := flag.Duration("queue-wait-timeout", 2*time.Second, "max time a request will wait in the queue for a free slot before getting a 503; ignored if queue-capacity is 0")
+	flag.Parse()
+
+	targets, err := parseBackendURLs(backends)
+	if err != nil {
+		log.Fatalf("%v", err)
+	}
+
+	// Logger for the load balancer. This is used to log incoming requests and to log backend interactions.
+	logger := log.New(os.Stdout, "", log.LstdFlags)
+
+	// TargetGroup contains the list of backend servers and their health status (healthy or unhealthy). It is used by the load balancer to determine which backends are eligible to receive traffic.
+	// Health status is updated by the health checker component (healthchecker.go), which periodically probes each backend to determine its availability.
+	group := targetgroup.New(targets)
+
+	// Creates a round-robin load balancer over the target group. It contributes only the "whose turn is it" decision --
+	// which backends are eligible at all is whatever the group currently says.
+	rr := balancer.NewRoundRobin(group)
+
+	// This overall HTTP handler is actually a stack / chain composed of 3 handlers: Logging handler -> MaxConcurrent handler -> Reverse Proxy handler
+	// A handler is any object/function that implements the http.Handler interface, which requires a single method: ServeHTTP(ResponseWriter, *Request). This method accepts an HTTP request and writes an HTTP response.
+	// Composes the final HTTP handler by wrapping the reverse proxy with the MaxConcurrent and Logging middlewares.
+	handler := middleware.Logging(logger)(middleware.MaxConcurrent(*maxConcurrent, *queueCapacity, *queueWaitTimeout)(proxy.New(rr, *backendTimeout, logger)))
+
+	// Creates an instance in memory of the HTTP load balancer server that listens for incoming HTTP requests at the specified address, and handles them using the composed handler.
+	// Note that this does not start the server yet; it merely prepares the server instance. The actual listening and serving happens later with server.ListenAndServe().
+	server := &http.Server{
+		Addr:    *listenAddr,
+		Handler: handler,
+	}
+
+	// healthCtx (healthContext) controls the health checker's polling goroutines specifically.
+	// It's cancelled on the same shutdown signal as the HTTP server below, so the checker stops polling backends rather than continuing to run after the load balancer itself has stopped accepting connections.
+	healthCtx, cancelHealth := context.WithCancel(context.Background())
+
+	// defer cancelHealth(): defer schedules a function call to run when the enclosing function (main, here) returns — regardless of how it returns (normal fall-through, or via a later return). It's a safety net: if main exits some other way than reaching line 126 normally, cancelHealth still fires and no goroutine leaks polling forever.
+	// Note cancelHealth can be called explicitly as well, and is in fact called explicitly at line 120 during normal shutdown — the defer is the backstop, not the primary mechanism.
+	defer cancelHealth()
+
+	// Create and start the health checker, which will periodically probe each backend in the target group (group)
+	// The checker runs in its own goroutine and stops when healthCtx is cancelled.
+	checker := healthcheck.NewChecker(targets, *healthCheckInterval, *healthCheckTimeout, *healthCheckPath, group, logger)
+	checker.Start(healthCtx)
+
+	// go func() { ... }(): launches a goroutine — a lightweight, independently-scheduled function execution managed by the Go runtime
+	// (not an OS thread directly, though the runtime multiplexes goroutines onto OS threads). go followed by a function call starts
+	//  that call running concurrently and returns immediately to the next line of main — it does not wait for the function to finish.
+	// This is necessary here because server.ListenAndServe() blocks — it runs forever, accepting connections, until the server is shut
+	// down or errors. If it ran directly in main() without go, execution would never reach the signal-handling code below.
+	go func() {
+		logger.Printf("load balancer listening on %s, forwarding to %s", *listenAddr, backends.String())
+		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			logger.Fatalf("server error: %v", err)
+		}
+	}()
+
+	// chan os.Signal: a channel is Go's built-in typed pipe for passing values between goroutines, with the runtime handling the synchronization. make(chan os.Signal, 1) creates one with buffer capacity 1 —
+	// meaning one value can be sent into it without a receiver ready to take it immediately (an unbuffered channel, capacity 0, would block the sender until someone receives).
+	// In plain language, I think this means stop is waiting for a SINGLE signal.
+	stop := make(chan os.Signal, 1)
+
+	// signal.Notify(stop, os.Interrupt, syscall.SIGTERM) tells the Go runtime "when the OS delivers SIGINT (Ctrl+C) or SIGTERM (the default signal kill sends)
+	// to this process, deliver it into the stop channel instead of the process's default action (which would just terminate immediately)."
+	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
+
+	// <-stop: the receive operator. This line blocks — main's goroutine sits here doing nothing — until a value arrives on stop.
+	// This is the whole synchronization mechanism: the main goroutine is parked here while the go func(){ ... }() above independently
+	// serves requests, until an OS signal wakes it up.
+	// Once unblocked (upon SIGINT Ctrl+C or SIGTERM kill signal): cancelHealth() below stops the health-check polling goroutines.
+	<-stop
+	logger.Println("shutting down...")
+
+	// stops the health-check polling goroutines
+	cancelHealth()
+
+	// shut down the server
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := server.Shutdown(ctx); err != nil {
+		logger.Printf("graceful shutdown failed: %v", err)
+	}
+}
